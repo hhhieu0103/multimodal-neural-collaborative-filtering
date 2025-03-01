@@ -1,0 +1,24 @@
+Baseline Models/Collaborative Filtering/Archive/
+Baseline Models/Collaborative Filtering/Data/
+
+Baseline Models/Content-Based Filtering/Price Prediction/__pycache__
+Baseline Models/Content-Based Filtering/Price Prediction/Data
+Baseline Models/Content-Based Filtering/Price Prediction/Evaluation
+Baseline Models/Content-Based Filtering/Similarity Matrix
+Baseline Models/Content-Based Filtering/Text Vectors
+Baseline Models/Content-Based Filtering/*.csv
+Baseline Models/Content-Based Filtering/*.json
+
+
+Cleaned
+Cleaned ID
+Detail Lists
+Final
+ID Lists
+Metadata
+Reviews
+
+*.json
+*.txt
+*.csv
+*.log
