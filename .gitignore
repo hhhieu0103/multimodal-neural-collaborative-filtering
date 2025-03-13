@@ -1,5 +1,6 @@
 Baseline Models/Collaborative Filtering/Archive/
 Baseline Models/Collaborative Filtering/Data/
+Baseline Models/Collaborative Filtering/Models/
 
 Baseline Models/Content-Based Filtering/Price Prediction/__pycache__
 Baseline Models/Content-Based Filtering/Price Prediction/Data
@@ -9,6 +10,9 @@ Baseline Models/Content-Based Filtering/Text Vectors
 Baseline Models/Content-Based Filtering/*.csv
 Baseline Models/Content-Based Filtering/*.json
 
+MultimodalNeuralCollaborativeFiltering/__pycache__
+pytorch/__pycache__
+pytorch/models
 
 Cleaned
 Cleaned ID
