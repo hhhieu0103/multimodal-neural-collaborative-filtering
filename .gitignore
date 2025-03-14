@@ -11,8 +11,8 @@ Baseline Models/Content-Based Filtering/*.csv
 Baseline Models/Content-Based Filtering/*.json
 
 MultimodalNeuralCollaborativeFiltering/__pycache__
-pytorch/__pycache__
-pytorch/models
+neural-collaborative-filtering/__pycache__
+neural-collaborative-filtering/models
 
 Cleaned
 Cleaned ID
