@@ -10,30 +10,21 @@ class Evaluation():
         self.k = k
         
     def predict_create_ground_truth(self):
-        # Generate predictions and prepare ground truth
-        self.predictions = {}  # user_id -> ordered list of recommended items
-        self.ground_truth = {}  # user_id -> set of relevant items from test set
+        self.predictions = {}
+        self.ground_truth = {}
         test_unique_users = self.test_data['user_idx'].unique()
-
-        # For each user in test set
+        
         for user_idx in test_unique_users:
+            test_unique_users = self.test_data['user_idx'].unique()
             relevant_items = set(self.test_data[self.test_data['user_idx'] == user_idx]['item_idx'])
             self.ground_truth[user_idx] = relevant_items
-            
-            scores = self.recommender.predict_for_users([user_idx])[user_idx].numpy()
-            top_k_items = []
-            
-            for item_id, score in enumerate(scores):
-                # For a min-heap, we use negative score to get highest scores
-                if len(top_k_items) < self.k:
-                    heapq.heappush(top_k_items, (score, item_id))
-                elif score > top_k_items[0][0]:
-                    heapq.heappushpop(top_k_items, (score, item_id))
-                    
-            # Convert heap to sorted list (highest scores first)
-            sorted_items = [item_id for score, item_id in sorted(top_k_items, reverse=True)]
-            
-            self.predictions[user_idx] = sorted_items
+
+        predictions = self.recommender.predict_for_users(test_unique_users)
+        
+        for user_idx, scores in predictions.items():
+            scores_np = scores.cpu().numpy()
+            top_k_indices = np.argsort(scores_np)[-self.k:][::-1]
+            self.predictions[user_idx] = top_k_indices.tolist()
         
     def evaluate(self):
         """

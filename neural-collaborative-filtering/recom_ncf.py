@@ -3,8 +3,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from ncf import NCF
-import datetime
-import os
+import numpy as np
+
+class BPRLoss(nn.Module):
+    def __init__(self):
+        super(BPRLoss, self).__init__()
+        
+    def forward(self, positive_predictions, negative_predictions):
+        loss = -torch.mean(torch.log(torch.sigmoid(positive_predictions - negative_predictions)))
+        return loss
 
 class NCFRecommender():
     def __init__(
@@ -14,11 +21,14 @@ class NCFRecommender():
         factors=8,
         layers=[64, 32, 16, 8],
         learning_rate=0.001,
-        batch_size=256,
+        batch_size=4096,
         epochs=20,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        dropout=0.0,
+        weight_decay=0.0,
         loss_fn='bce',
-        optimizer='sgd'
+        optimizer='sgd',
+        early_stopping_patience=5,
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         ):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
@@ -26,83 +36,134 @@ class NCFRecommender():
         self.device = device
         self.loss_fn = loss_fn
         self.optimizer = optimizer
+        self.weight_decay = weight_decay
+        self.early_stopping_patience = early_stopping_patience
+        
         self.unique_users = torch.tensor(unique_users)
         self.unique_items = torch.tensor(unique_items)
-        self.model = NCF(len(unique_users), len(unique_items), factors, layers).to(self.device)
+        
+        self.model = NCF(len(unique_users), len(unique_items), factors, layers, dropout).to(self.device)
         
     def get_loss_function(self):
         if (self.loss_fn == 'bce'):
             return nn.BCELoss()
-        raise ValueError(self.loss_fn)
+        elif (self.loss_fn == 'mse'):
+            return nn.MSELoss()
+        elif (self.loss_fn == 'bpr'):
+            return BPRLoss()
+        else:
+            raise ValueError(f'Unsupported loss function: {self.loss_fn}')
     
     def get_optimizer(self):
         if (self.optimizer == 'sgd'):
-            return optim.SGD(self.model.parameters(), lr=self.learning_rate)
-        raise ValueError
+            return optim.SGD(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        elif (self.optimizer == 'adam'):
+            return optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        elif (self.optimizer == 'adagrad'):
+            return optim.Adagrad(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        else:
+            raise ValueError(f'Unsupported optimizer: {self.optimizer}')
     
     def fit(self, train_data: DataLoader, eval_data: DataLoader):
         train_losses = []
         eval_losses = []
+        
+        best_eval_loss = float('inf')
+        patience_counter = 0
+        best_model_state = None
+        
         loss_fn = self.get_loss_function()
         optimizer = self.get_optimizer()
-        for t in range(self.epochs):
-            print(f"Epoch {t+1}\n-------------------------------")
-            train_losses.append(self.train(train_data, loss_fn, optimizer))
-            eval_losses.append(self.evaluate(eval_data, loss_fn))
+        
+        for epoch in range(self.epochs):
+            print(f"Epoch {epoch+1}/{self.epochs}")
+            
+            train_loss = self.train(train_data, loss_fn, optimizer)
+            train_losses.append(train_loss)
+            
+            eval_loss = self.evaluate(eval_data, loss_fn)
+            eval_losses.append(eval_loss)
+            
+            print(f'Train loss: {train_loss:.6f}, Eval loss: {eval_loss:.6f}')
+            
+            if eval_loss < best_eval_loss:
+                best_eval_loss = eval_loss
+                patience_counter = 0
+                best_model_state = self.model.state_dict().copy()
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= self.early_stopping_patience:
+                print(f'Early stopping triggered after {epoch+1} epochs')
+                break
+            
+            print('='*50)
+            
+        if best_model_state:
+            self.model.load_state_dict(best_model_state)
+            
         self.train_losses = train_losses
         self.eval_losses = eval_losses
-        print("Done!")
+        print("Training completed!")
     
     def train(self, train_data, loss_fn, optimizer):
-        size = len(train_data.dataset)
-        self.model.to(self.device)
-        losses = []
         self.model.train()
-        for batch, (users, items, ratings) in enumerate(train_data):
-            users, items, ratings = users.to(self.device), items.to(self.device), ratings.to(self.device)
+        total_loss = 0
+        num_batches = 0
+        
+        for users, items, ratings in train_data:
+            users = users.to(self.device)
+            items = items.to(self.device)
+            ratings = ratings.to(self.device)
 
             optimizer.zero_grad()
-            pred = self.model(users, items)
-            loss = loss_fn(pred, ratings)
+            predictions = self.model(users, items)
+            loss = loss_fn(predictions, ratings)
 
             loss.backward()
             optimizer.step()
 
-            # Add batch's loss to the losses list
-            losses.append(loss.item())
-            if batch % 100 == 0:
-                loss, current = loss.item(), batch * self.batch_size + len(ratings)
-                print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-        
-        # Return the average loss of an epoch
-        return sum(losses)/len(losses)
+            total_loss += loss.item()
+            num_batches += 1
+            
+        return total_loss / num_batches
     
     def evaluate(self, eval_data, loss_fn):
         self.model.eval()
-        losses = []
+        total_loss = 0
+        num_batches = 0
 
         with torch.no_grad():
             for users, items, ratings in eval_data:
-                users, items, ratings = users.to(self.device), items.to(self.device), ratings.to(self.device)
-                pred = self.model(users, items)
-                loss = loss_fn(pred, ratings)
-                losses.append(loss.item())
+                users = users.to(self.device)
+                items = items.to(self.device)
+                ratings = ratings.to(self.device)
                 
-        avg_loss = sum(losses)/len(losses)
-        print(f"Avg loss on test: {avg_loss:>8f} \n")
-        return avg_loss
+                predictions = self.model(users, items)
+                loss = loss_fn(predictions, ratings)
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+        return total_loss / num_batches
     
-    def predict(self, users, items):
+    def predict(self, users: torch.Tensor | np.ndarray, items: torch.Tensor | np.ndarray):
         self.model.eval()
-        users = torch.tensor(users, dtype=torch.long)
-        items = torch.tensor(items, dtype=torch.long)
+        
+        if not isinstance(users, torch.Tensor):
+            users = torch.tensor(users, dtype=torch.long)
+        if not isinstance(items, torch.Tensor):
+            items = torch.tensor(items, dtype=torch.long)
+            
+        users = users.to(self.device)
+        items = items.to(self.device)
+        
         with torch.no_grad():
-            users = users.to(self.device)
-            items = items.to(self.device)
-            predictions =self.model(users, items)
-        return predictions
+            predictions = self.model(users, items)
+            
+        return predictions.cpu()
     
-    def predict_for_users(self, users, batch_size=1024):
+    def predict_for_users(self, users, batch_size=1024, items: torch.Tensor | np.ndarray | None = None):
         """
         Generate predictions for all items for each user
         
@@ -116,14 +177,19 @@ class NCFRecommender():
         self.model.eval()
         predictions = {}
         
+        if items is None:
+            items = torch.arange(len(self.unique_items))
+        elif not isinstance(items, torch.Tensor):
+            items = torch.tensor(items, dtype=torch.long)
+        
         with torch.no_grad():
             # Process each user
             for user_id in users:
-                user_tensor = torch.full((len(self.unique_items),), user_id, dtype=torch.long)
+                user_tensor = torch.full((len(items),), user_id, dtype=torch.long)
                 
                 all_scores = []
-                for i in range(0, len(self.unique_items), batch_size):
-                    batch_items = self.unique_items[i:i+batch_size]
+                for i in range(0, len(items), batch_size):
+                    batch_items = items[i:i+batch_size]
                     batch_users = user_tensor[i:i+batch_size]
                     
                     # Move to device
@@ -140,49 +206,37 @@ class NCFRecommender():
                 
         return predictions
     
-    def get_top_k_recommendations(predictions, k=10, exclude_known=None):
-        """
-        Get top-K item recommendations for each user
-        
-        Args:
-            predictions: Dictionary mapping user IDs to item scores
-            k: Number of recommendations to return
-            exclude_known: Dictionary mapping user IDs to sets of known item IDs to exclude
-            
-        Returns:
-            Dictionary mapping user IDs to lists of recommended item IDs
-        """
-        recommendations = {}
-        
-        for user_id, scores in predictions.items():
-            # Create a mask for items to exclude (optional)
-            if exclude_known and user_id in exclude_known:
-                mask = torch.ones_like(scores, dtype=torch.bool)
-                for item_id in exclude_known[user_id]:
-                    mask[item_id] = False
-                masked_scores = scores.clone()
-                masked_scores[~mask] = float('-inf')  # Set known items to negative infinity
-            else:
-                masked_scores = scores
-            
-            # Get top-K items
-            values, indices = masked_scores.topk(k)
-            recommendations[user_id] = indices.tolist()
-            
-        return recommendations
+    def save(self, path):
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'model_config': {
+                'num_users': len(self.unique_users),
+                'num_items': len(self.unique_items),
+                'factors': self.model.mf_user_embedding.weight.shape[1],
+                'layers': [layer.out_features for layer in self.model.mlp_layers],
+                'dropout': self.model.dropout
+            }
+        }, path)
     
-    def save(self, name='model.pth', path='models'):
-        if not os.path.exists(path):
-            os.makedirs(path, mode=777)
+    @classmethod
+    def load(cls, path, device=None):
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             
-        current_datetime = datetime.datetime.now()
-        datetime_string = current_datetime.strftime("_%Y-%m-%d_%H-%M-%S")
-            
-        name, ext = os.path.splitext(name)
-        name += datetime_string + ext
-        model_path = os.path.join(path, name)
+        checkpoint = torch.load(path, map_location=device)
+        config = checkpoint['model_config']
         
-        torch.save(self.model.state_dict(), model_path)
+        # Create model
+        recommender = cls(
+            unique_users=list(range(config['num_users'])),
+            unique_items=list(range(config['num_items'])),
+            factors=config['factors'],
+            layers=config['layers'],
+            dropout=config.get('dropout', 0.0),
+            device=device
+        )
         
-    def load():
-        raise NotImplementedError
+        # Load weights
+        recommender.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        return recommender
