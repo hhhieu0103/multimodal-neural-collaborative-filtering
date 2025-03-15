@@ -161,59 +161,95 @@ class NCFRecommender():
             
         return predictions.cpu()
     
-    def predict_for_users(self, users, batch_size=1024, items=None):
+    def batch_predict_for_users(self, users, items=None, user_batch_size=1024, item_batch_size=8192, k=10):
         """
-        Generate predictions for all items for each user in an efficient batched manner
+        Generate predictions for all items for each user and return the top-k items
         
         Args:
             users: List or array of user IDs
-            batch_size: Batch size for prediction
             items: Optional tensor of item IDs. If None, all items are used.
+            user_batch_size: Number of users to process in each batch
+            item_batch_size: Number of items to process in each batch
+            k: Number of top items to retain per user
             
         Returns:
-            Dictionary mapping user IDs to tensors of scores for all items
+            Dictionary mapping user IDs to lists of top-k item indices
         """
+        import gc  # For garbage collection
+        
         self.model.eval()
         predictions = {}
         
-        if not isinstance(users, torch.Tensor):
-            users = torch.tensor(users, dtype=torch.long)
-            
-        if items is None:
-            items = torch.arange(len(self.unique_items))
-        elif not isinstance(items, torch.Tensor):
-            items = torch.tensor(items, dtype=torch.long)
+        # Convert users to numpy for final processing
+        if isinstance(users, torch.Tensor):
+            users_np = users.cpu().numpy()
+        else:
+            users_np = np.array(users)
         
-        num_users = len(users)
+        # Setup item tensor on device
+        if items is None:
+            items = torch.arange(len(self.unique_items), device=self.device)
+        elif not isinstance(items, torch.Tensor):
+            items = torch.tensor(items, dtype=torch.long, device=self.device)
+        
+        num_users = len(users_np)
         num_items = len(items)
+        num_batches = (num_users - 1) // user_batch_size + 1
         
         with torch.no_grad():
             # Process users in batches
-            for i in range(0, num_users, batch_size):
-                batch_users = users[i:i+batch_size].to(self.device)
-                user_batch_size = len(batch_users)
+            for i in range(0, num_users, user_batch_size):
+                batch_users_np = users_np[i:i+user_batch_size]
+                batch_size = len(batch_users_np)
+                batch_num = i // user_batch_size + 1
                 
-                # Create a tensor to store all scores for this batch of users
-                batch_scores = torch.zeros(user_batch_size, num_items, device=self.device)
+                print(f'Processing user batch {batch_num}/{num_batches} ({batch_size} users)')
                 
-                # Process items in batches for each user batch
-                for j in range(0, num_items, batch_size):
-                    batch_items = items[j:j+batch_size].to(self.device)
-                    item_batch_size = len(batch_items)
+                users_tensor = torch.tensor(batch_users_np, dtype=torch.long, device=self.device)
+                
+                # Allocate scores tensor for this batch
+                all_scores_gpu = torch.zeros((batch_size, num_items), device=self.device)
+                
+                # Process items in batches
+                for j in range(0, num_items, item_batch_size):
+                        
+                    batch_items = items[j:j+item_batch_size]
+                    item_batch_size_actual = len(batch_items)
                     
-                    # Create meshgrid of user-item pairs
-                    users_matrix = batch_users.unsqueeze(1).expand(user_batch_size, item_batch_size).reshape(-1)
-                    items_matrix = batch_items.unsqueeze(0).expand(user_batch_size, item_batch_size).reshape(-1)
+                    # Create user-item pairs
+                    users_matrix = users_tensor.repeat_interleave(item_batch_size_actual)
+                    items_matrix = batch_items.repeat(batch_size)
                     
                     # Make predictions
-                    scores = self.model(users_matrix, items_matrix)
+                    batch_scores = self.model(users_matrix, items_matrix)
                     
                     # Reshape and store scores
-                    batch_scores[:, j:j+item_batch_size] = scores.view(user_batch_size, item_batch_size)
+                    batch_scores = batch_scores.view(batch_size, item_batch_size_actual)
+                    all_scores_gpu[:, j:j+item_batch_size_actual] = batch_scores
+                    
+                    # Clean up intermediate tensors
+                    del users_matrix, items_matrix, batch_scores
                 
-                # Store predictions for each user in the current batch
-                for idx, user_id in enumerate(batch_users.cpu().numpy()):
-                    predictions[user_id] = batch_scores[idx].detach()
+                # Store predictions for this batch of users
+                for idx, user_id in enumerate(batch_users_np):
+                    # Get the user's scores and convert to numpy right away
+                    user_scores = all_scores_gpu[idx].cpu().numpy()
+                    
+                    # Find top-k items using argpartition (much faster than argsort for just finding top-k)
+                    top_k_indices = np.argpartition(user_scores, -k)[-k:]
+                    # Sort just the top k items by score
+                    top_k_indices = top_k_indices[np.argsort(-user_scores[top_k_indices])]
+                    
+                    # Store only the top-k indices, not the full score array
+                    predictions[user_id] = top_k_indices.tolist()
+                    
+                    # Clean up user scores to free memory immediately
+                    del user_scores
+                
+                # Clean up
+                del all_scores_gpu, users_tensor
+                torch.cuda.empty_cache()
+                gc.collect()
         
         return predictions
     

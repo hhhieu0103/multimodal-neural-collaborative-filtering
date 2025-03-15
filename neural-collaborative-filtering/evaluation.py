@@ -14,124 +14,37 @@ class Evaluation():
     def predict_create_ground_truth(self):
         import gc  # For garbage collection
         
+        print("Starting evaluation preparation...")
         self.predictions = {}
         self.ground_truth = {}
         test_unique_users = self.test_data['user_idx'].unique()
         
+        print(f"Creating ground truth sets for {len(test_unique_users)} users...")
         # Create ground truth efficiently using NumPy arrays
         user_array = self.test_data['user_idx'].values
         item_array = self.test_data['item_idx'].values
         
         # Find unique users and create ground truth sets
         unique_users = np.unique(user_array)
-        for user in unique_users:
+        user_count = len(unique_users)
+        
+        for i, user in enumerate(unique_users):
             self.ground_truth[user] = set(item_array[user_array == user])
         
-        # Get predictions for all users at once
-        # If your GPU can handle it, this will be much faster
-        all_predictions = self.batch_predict_for_users(test_unique_users)
+        print("Generating predictions...")
+        # Get predictions for all users - this now returns only the top-K indices directly
+        self.predictions = self.recommender.batch_predict_for_users(
+            test_unique_users,
+            user_batch_size=self.user_batch_size,
+            item_batch_size=self.item_batch_size,
+            k=self.k
+        )
         
-        # Process each user's predictions
-        for user_id, scores in all_predictions.items():
-            if isinstance(scores, torch.Tensor):
-                scores_np = scores.numpy()
-            else:
-                scores_np = np.array(scores)
-                
-            # Use argpartition for efficient top-k selection
-            top_k_indices = np.argpartition(scores_np, -self.k)[-self.k:]
-            # Sort just the top k items by score
-            top_k_indices = top_k_indices[np.argsort(-scores_np[top_k_indices])]
-            self.predictions[user_id] = top_k_indices.tolist()
-        
-        # Clean up
-        del all_predictions
+        # Since the recommender now returns the top-K indices directly, we don't need to process them further
+        print("Evaluation preparation complete!")
         gc.collect()
         torch.cuda.empty_cache()
     
-    def batch_predict_for_users(self, users, items=None):
-        """
-        Generate predictions for all items for all users at once
-        
-        Args:
-            users: List or array of user IDs
-            items: Optional tensor of item IDs. If None, all items are used.
-            
-        Returns:
-            Dictionary mapping user IDs to tensors of scores for all items
-        """
-        import gc  # For garbage collection
-        
-        self.recommender.model.eval()
-        predictions = {}
-        
-        # Convert users to numpy for final processing
-        if isinstance(users, torch.Tensor):
-            users_np = users.cpu().numpy()
-        else:
-            users_np = np.array(users)
-        
-        # Setup item tensor on device
-        if items is None:
-            items = torch.arange(len(self.recommender.unique_items), device=self.recommender.device)
-        elif not isinstance(items, torch.Tensor):
-            items = torch.tensor(items, dtype=torch.long, device=self.recommender.device)
-        
-        num_users = len(users_np)
-        num_items = len(items)
-        
-        with torch.no_grad():
-            # Process users in batches
-            for i in range(0, num_users, self.user_batch_size):
-                print(f'Processing user batch {i+1}/{num_users}')
-                batch_users_np = users_np[i:i+self.user_batch_size]
-                batch_size = len(batch_users_np)
-                users_tensor = torch.tensor(batch_users_np, dtype=torch.long, device=self.recommender.device)
-                
-                # Allocate scores tensor for this batch
-                all_scores_gpu = torch.zeros((batch_size, num_items), device=self.recommender.device)
-                
-                # Process items in batches
-                for j in range(0, num_items, self.item_batch_size):
-                    batch_items = items[j:j+self.item_batch_size]
-                    item_batch_size = len(batch_items)
-                    
-                    # Create user-item pairs
-                    users_matrix = users_tensor.repeat_interleave(item_batch_size)
-                    items_matrix = batch_items.repeat(batch_size)
-                    
-                    # Make predictions
-                    batch_scores = self.recommender.model(users_matrix, items_matrix)
-                    
-                    # Reshape and store scores
-                    batch_scores = batch_scores.view(batch_size, item_batch_size)
-                    all_scores_gpu[:, j:j+item_batch_size] = batch_scores
-                    
-                    # Clean up intermediate tensors
-                    del users_matrix, items_matrix, batch_scores
-                
-                # Store predictions for this batch of users
-                for idx, user_id in enumerate(batch_users_np):
-                    # Get the user's scores and convert to numpy right away
-                    user_scores = all_scores_gpu[idx].cpu().numpy()
-                    
-                    # Find top-k items
-                    top_k_indices = np.argpartition(user_scores, -self.k)[-self.k:]
-                    top_k_indices = top_k_indices[np.argsort(-user_scores[top_k_indices])]
-                    
-                    # Store only the top-k indices, not the full score array
-                    predictions[user_id] = top_k_indices.tolist()
-                    
-                    # Clean up user scores to free memory immediately
-                    del user_scores
-                
-                # Clean up
-                del all_scores_gpu, users_tensor
-                torch.cuda.empty_cache()
-                gc.collect()
-        
-        return predictions
-
     def evaluate(self):
         """
         Evaluate the model using the specified metrics.
@@ -139,16 +52,30 @@ class Evaluation():
         Returns:
             Dictionary containing metric names and scores
         """
+        import gc
         
         if self.predictions is None or self.ground_truth is None:
             self.predict_create_ground_truth()
         
+        print("Calculating Hit Ratio...")
+        hit_ratio = self.hit_ratio_at_k()
+        gc.collect()
+        
+        print("Calculating NDCG...")
+        ndcg = self.ndcg_at_k()
+        gc.collect()
+        
+        print("Calculating Recall...")
+        recall = self.recall_at_k()
+        gc.collect()
+        
         self.metrics = {
-            'Hit Ratio@{}'.format(self.k): self.hit_ratio_at_k(),
-            'NDCG@{}'.format(self.k): self.ndcg_at_k(),
-            'Recall@{}'.format(self.k): self.recall_at_k()
+            'Hit Ratio@{}'.format(self.k): hit_ratio,
+            'NDCG@{}'.format(self.k): ndcg,
+            'Recall@{}'.format(self.k): recall
         }
         
+        print("Evaluation complete!")
         return self.metrics
     
     def hit_ratio_at_k(self):
