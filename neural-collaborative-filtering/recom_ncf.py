@@ -21,7 +21,6 @@ class NCFRecommender():
         factors=8,
         layers=[64, 32, 16, 8],
         learning_rate=0.001,
-        batch_size=4096,
         epochs=20,
         dropout=0.0,
         weight_decay=0.0,
@@ -31,7 +30,6 @@ class NCFRecommender():
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         ):
         self.learning_rate = learning_rate
-        self.batch_size = batch_size
         self.epochs = epochs
         self.device = device
         self.loss_fn = loss_fn
@@ -163,13 +161,14 @@ class NCFRecommender():
             
         return predictions.cpu()
     
-    def predict_for_users(self, users, batch_size=1024, items: torch.Tensor | np.ndarray | None = None):
+    def predict_for_users(self, users, batch_size=1024, items=None):
         """
-        Generate predictions for all items for each user
+        Generate predictions for all items for each user in an efficient batched manner
         
         Args:
-            users: List of user IDs
+            users: List or array of user IDs
             batch_size: Batch size for prediction
+            items: Optional tensor of item IDs. If None, all items are used.
             
         Returns:
             Dictionary mapping user IDs to tensors of scores for all items
@@ -177,33 +176,45 @@ class NCFRecommender():
         self.model.eval()
         predictions = {}
         
+        if not isinstance(users, torch.Tensor):
+            users = torch.tensor(users, dtype=torch.long)
+            
         if items is None:
             items = torch.arange(len(self.unique_items))
         elif not isinstance(items, torch.Tensor):
             items = torch.tensor(items, dtype=torch.long)
         
+        num_users = len(users)
+        num_items = len(items)
+        
         with torch.no_grad():
-            # Process each user
-            for user_id in users:
-                user_tensor = torch.full((len(items),), user_id, dtype=torch.long)
+            # Process users in batches
+            for i in range(0, num_users, batch_size):
+                batch_users = users[i:i+batch_size].to(self.device)
+                user_batch_size = len(batch_users)
                 
-                all_scores = []
-                for i in range(0, len(items), batch_size):
-                    batch_items = items[i:i+batch_size]
-                    batch_users = user_tensor[i:i+batch_size]
+                # Create a tensor to store all scores for this batch of users
+                batch_scores = torch.zeros(user_batch_size, num_items, device=self.device)
+                
+                # Process items in batches for each user batch
+                for j in range(0, num_items, batch_size):
+                    batch_items = items[j:j+batch_size].to(self.device)
+                    item_batch_size = len(batch_items)
                     
-                    # Move to device
-                    batch_users = batch_users.to(self.device)
-                    batch_items = batch_items.to(self.device)
+                    # Create meshgrid of user-item pairs
+                    users_matrix = batch_users.unsqueeze(1).expand(user_batch_size, item_batch_size).reshape(-1)
+                    items_matrix = batch_items.unsqueeze(0).expand(user_batch_size, item_batch_size).reshape(-1)
                     
-                    # Get predictions
-                    batch_scores = self.model(batch_users, batch_items)
-                    all_scores.append(batch_scores.cpu())
+                    # Make predictions
+                    scores = self.model(users_matrix, items_matrix)
+                    
+                    # Reshape and store scores
+                    batch_scores[:, j:j+item_batch_size] = scores.view(user_batch_size, item_batch_size)
                 
-                # Combine all batches
-                user_predictions = torch.cat(all_scores).squeeze()
-                predictions[user_id] = user_predictions
-                
+                # Store predictions for each user in the current batch
+                for idx, user_id in enumerate(batch_users.cpu().numpy()):
+                    predictions[user_id] = batch_scores[idx].detach()
+        
         return predictions
     
     def save(self, path):
