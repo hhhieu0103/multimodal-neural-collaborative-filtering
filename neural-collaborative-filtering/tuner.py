@@ -214,9 +214,9 @@ class NCFTuner:
         
         # Save final results
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._save_results(results, f"random_search_final_{timestamp}")
+        result_path = self._save_results(results, f"random_search_final_{timestamp}")
         
-        return results
+        return results, result_path
     
     def _save_results(self, results, filename):
         """Save results to a file"""
@@ -237,6 +237,8 @@ class NCFTuner:
         
         with open(filepath, 'w') as f:
             json.dump(serializable_results, f, indent=2)
+            
+        return filepath
         
     def analyze_results(self, results_file=None):
         """Analyze tuning results and return best parameters"""
