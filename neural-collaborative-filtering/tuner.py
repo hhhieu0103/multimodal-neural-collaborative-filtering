@@ -19,7 +19,7 @@ class NCFTuner:
         test_data,
         unique_users,
         unique_items,
-        k_values=[10, 20, 50],
+        k_values=[50, 20, 10],
         results_dir='tuning_results'
     ):
         self.train_data = train_data
@@ -37,12 +37,12 @@ class NCFTuner:
         self.param_grid = {
             'factors': [8, 16, 32, 64],
             'layers': [[64, 32, 16, 8], [128, 64, 32, 16]],
-            'learning_rate': [0.001, 0.01, 0.0001],
-            'epochs': [10],
+            'learning_rate': [0.0001, 0.001, 0.01],
+            'epochs': [10, 20, 50],
             'batch_size': [4096, 8192, 16384],
             'optimizer': ['sgd', 'adam', 'adagrad'],
             'dropout': [0.0, 0.2, 0.5],
-            'weight_decay': [0.0, 0.00001, 0.0001],
+            'weight_decay': [0.0, 0.0001, 0.00001],
             'loss_fn': ['bce', 'mse', 'bpr']
         }
         
@@ -88,7 +88,8 @@ class NCFTuner:
         eval_results = {}
         evaluator = Evaluation(
             recommender=model,
-            test_data=self.test_data
+            test_data=self.test_data,
+            max_k=max(self.k_values)
         )
         for k in self.k_values:
             metrics = evaluator.evaluate(k)

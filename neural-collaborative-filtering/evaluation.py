@@ -2,16 +2,15 @@ import numpy as np
 import torch
 
 class Evaluation():
-    def __init__(self, recommender=None, test_data=None, predictions=None, ground_truth=None):
+    def __init__(self, recommender=None, test_data=None, max_k=50, predictions=None, ground_truth=None):
         self.recommender = recommender
         self.test_data = test_data
         self.predictions = predictions
         self.ground_truth = ground_truth
+        self.max_k = max_k
         
     def predict_create_ground_truth(self, k, user_batch_size, item_batch_size):
         import gc  # For garbage collection
-        
-        self.max_k = k
         
         print("Starting evaluation preparation...")
         self.predictions = {}
