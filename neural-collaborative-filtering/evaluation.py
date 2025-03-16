@@ -2,17 +2,16 @@ import numpy as np
 import torch
 
 class Evaluation():
-    def __init__(self, recommender=None, test_data=None, k=10, predictions=None, ground_truth=None, user_batch_size=1024, item_batch_size=8192):
+    def __init__(self, recommender=None, test_data=None, predictions=None, ground_truth=None):
         self.recommender = recommender
         self.test_data = test_data
         self.predictions = predictions
         self.ground_truth = ground_truth
-        self.k = k
-        self.user_batch_size = user_batch_size
-        self.item_batch_size = item_batch_size
         
-    def predict_create_ground_truth(self):
+    def predict_create_ground_truth(self, k, user_batch_size, item_batch_size):
         import gc  # For garbage collection
+        
+        self.max_k = k
         
         print("Starting evaluation preparation...")
         self.predictions = {}
@@ -26,26 +25,20 @@ class Evaluation():
         
         # Find unique users and create ground truth sets
         unique_users = np.unique(user_array)
-        user_count = len(unique_users)
         
         for i, user in enumerate(unique_users):
             self.ground_truth[user] = set(item_array[user_array == user])
         
         print("Generating predictions...")
         # Get predictions for all users - this now returns only the top-K indices directly
-        self.predictions = self.recommender.batch_predict_for_users(
-            test_unique_users,
-            user_batch_size=self.user_batch_size,
-            item_batch_size=self.item_batch_size,
-            k=self.k
-        )
+        self.predictions = self.recommender.batch_predict_for_users(test_unique_users, k=k, user_batch_size=user_batch_size, item_batch_size=item_batch_size)
         
         # Since the recommender now returns the top-K indices directly, we don't need to process them further
         print("Evaluation preparation complete!")
         gc.collect()
         torch.cuda.empty_cache()
     
-    def evaluate(self):
+    def evaluate(self, k=10, user_batch_size=1024, item_batch_size=8192):
         """
         Evaluate the model using the specified metrics.
         
@@ -55,30 +48,34 @@ class Evaluation():
         import gc
         
         if self.predictions is None or self.ground_truth is None:
-            self.predict_create_ground_truth()
+            self.predict_create_ground_truth(k, user_batch_size=user_batch_size, item_batch_size=item_batch_size)
+            
+        if k > self.max_k:
+            print(f'The predictions were made with k={self.max_k}. The evaluation metrics can only be calculated with k <= {self.max_k}. The k parameter is {k}, which exceeds the max k value. Falling back to k={self.max_k}')
+            k = self.max_k
         
         print("Calculating Hit Ratio...")
-        hit_ratio = self.hit_ratio_at_k()
+        hit_ratio = self.hit_ratio_at_k(k)
         gc.collect()
         
         print("Calculating NDCG...")
-        ndcg = self.ndcg_at_k()
+        ndcg = self.ndcg_at_k(k)
         gc.collect()
         
         print("Calculating Recall...")
-        recall = self.recall_at_k()
+        recall = self.recall_at_k(k)
         gc.collect()
         
         self.metrics = {
-            'Hit Ratio@{}'.format(self.k): hit_ratio,
-            'NDCG@{}'.format(self.k): ndcg,
-            'Recall@{}'.format(self.k): recall
+            'Hit Ratio@{}'.format(k): hit_ratio,
+            'NDCG@{}'.format(k): ndcg,
+            'Recall@{}'.format(k): recall
         }
         
         print("Evaluation complete!")
         return self.metrics
     
-    def hit_ratio_at_k(self):
+    def hit_ratio_at_k(self, k):
         """
         Calculate Hit Ratio@k for recommendations.
         
@@ -93,7 +90,7 @@ class Evaluation():
                 continue
                 
             # Get top-k recommendations for this user
-            recommended_items = self.predictions[user_idx][:self.k]
+            recommended_items = self.predictions[user_idx][:k]
             
             # Check if any true items appear in the recommendations
             if any(item in true_items for item in recommended_items):
@@ -101,7 +98,7 @@ class Evaluation():
 
         return hits / total_users if total_users > 0 else 0
     
-    def ndcg_at_k(self):
+    def ndcg_at_k(self, k):
         """
         Calculate NDCG@k for recommendations.
         
@@ -115,7 +112,7 @@ class Evaluation():
                 continue
                 
             # Get top-k recommendations for this user
-            recommended_items = self.predictions[user_id][:self.k]
+            recommended_items = self.predictions[user_id][:k]
             
             # Create a binary relevance vector
             relevance = [1 if item in true_items else 0 for item in recommended_items]
@@ -125,7 +122,7 @@ class Evaluation():
             dcg = np.sum(relevance / discounts)
             
             # Calculate ideal DCG (IDCG)
-            ideal_relevance = [1] * min(len(true_items), self.k)
+            ideal_relevance = [1] * min(len(true_items), k)
             idcg = np.sum(ideal_relevance / discounts[:len(ideal_relevance)])
             
             # Calculate NDCG
@@ -134,7 +131,7 @@ class Evaluation():
         
         return np.mean(ndcg_scores) if ndcg_scores else 0
     
-    def recall_at_k(self):
+    def recall_at_k(self, k):
         """
         Calculate Recall@k for recommendations.
         
@@ -148,7 +145,7 @@ class Evaluation():
                 continue
                 
             # Get top-k recommendations for this user
-            recommended_items = self.predictions[user_id][:self.k]
+            recommended_items = self.predictions[user_id][:k]
             
             # Count relevant items in the recommendations
             relevant_set = set(true_items)

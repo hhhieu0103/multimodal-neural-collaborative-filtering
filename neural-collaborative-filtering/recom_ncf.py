@@ -62,11 +62,11 @@ class NCFRecommender():
         else:
             raise ValueError(f'Unsupported optimizer: {self.optimizer}')
     
-    def fit(self, train_data: DataLoader, eval_data: DataLoader):
+    def fit(self, train_data: DataLoader, val_data: DataLoader):
         train_losses = []
-        eval_losses = []
+        val_losses = []
         
-        best_eval_loss = float('inf')
+        best_val_loss = float('inf')
         patience_counter = 0
         best_model_state = None
         
@@ -79,13 +79,13 @@ class NCFRecommender():
             train_loss = self.train(train_data, loss_fn, optimizer)
             train_losses.append(train_loss)
             
-            eval_loss = self.evaluate(eval_data, loss_fn)
-            eval_losses.append(eval_loss)
+            val_loss = self.validate(val_data, loss_fn)
+            val_losses.append(val_loss)
             
-            print(f'Train loss: {train_loss:.6f}, Eval loss: {eval_loss:.6f}')
+            print(f'Train loss: {train_loss:.6f}, Validation loss: {val_loss:.6f}')
             
-            if eval_loss < best_eval_loss:
-                best_eval_loss = eval_loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 patience_counter = 0
                 best_model_state = self.model.state_dict().copy()
             else:
@@ -101,7 +101,7 @@ class NCFRecommender():
             self.model.load_state_dict(best_model_state)
             
         self.train_losses = train_losses
-        self.eval_losses = eval_losses
+        self.val_losses = val_losses
         print("Training completed!")
     
     def train(self, train_data, loss_fn, optimizer):
@@ -126,13 +126,13 @@ class NCFRecommender():
             
         return total_loss / num_batches
     
-    def evaluate(self, eval_data, loss_fn):
+    def validate(self, val_data, loss_fn):
         self.model.eval()
         total_loss = 0
         num_batches = 0
 
         with torch.no_grad():
-            for users, items, ratings in eval_data:
+            for users, items, ratings in val_data:
                 users = users.to(self.device)
                 items = items.to(self.device)
                 ratings = ratings.to(self.device)
@@ -161,26 +161,29 @@ class NCFRecommender():
             
         return predictions.cpu()
     
-    def batch_predict_for_users(self, users, items=None, user_batch_size=1024, item_batch_size=8192, k=10):
+    def batch_predict_for_users(self, users: torch.Tensor | np.ndarray, items: torch.Tensor | np.ndarray | None =None, 
+                         user_batch_size=1024, item_batch_size=8192, k=10, memory_threshold=0.9):
         """
-        Generate predictions for all items for each user and return the top-k items
+        Generate predictions for all items for each user with dynamic batch size adjustment
+        based on GPU memory usage to avoid expensive shared memory operations
         
         Args:
             users: List or array of user IDs
             items: Optional tensor of item IDs. If None, all items are used.
-            user_batch_size: Number of users to process in each batch
-            item_batch_size: Number of items to process in each batch
+            user_batch_size: Initial number of users to process in each batch
+            item_batch_size: Initial number of items to process in each batch
             k: Number of top items to retain per user
+            memory_threshold: GPU memory utilization threshold (0-1) to trigger batch size reduction
             
         Returns:
             Dictionary mapping user IDs to lists of top-k item indices
         """
-        import gc  # For garbage collection
+        import gc
         
         self.model.eval()
         predictions = {}
         
-        # Convert users to numpy for final processing
+        # Convert users to numpy for iteration if needed
         if isinstance(users, torch.Tensor):
             users_np = users.cpu().numpy()
         else:
@@ -194,62 +197,158 @@ class NCFRecommender():
         
         num_users = len(users_np)
         num_items = len(items)
-        num_batches = (num_users - 1) // user_batch_size + 1
+        
+        # Current batch sizes (will be adjusted dynamically)
+        current_user_batch_size = user_batch_size
+        current_item_batch_size = item_batch_size
+        
+        # Track if we're using shared memory
+        using_shared_memory = False
+        
+        # Function to check GPU memory usage
+        def get_gpu_memory_usage():
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                reserved = torch.cuda.memory_reserved() / (1024 ** 3)    # GB
+                # Use reserved memory to calculate usage since it better reflects
+                # the total memory footprint including allocated memory and caching
+                gpu_memory_usage = reserved / 8.0  # 8GB is the dedicated GPU memory  
+                return reserved, gpu_memory_usage
+            return 0, 0, 0
+        
+        # Function to adjust batch sizes based on memory usage
+        def adjust_batch_sizes():
+            nonlocal current_user_batch_size, current_item_batch_size, using_shared_memory
+            
+            reserved, gpu_memory_usage = get_gpu_memory_usage()
+            
+            # Print memory stats
+            print(f"GPU Memory: Reserved={reserved:.2f}GB, Usage={gpu_memory_usage:.2f}")
+            
+            # If memory usage is high but we haven't reduced batch sizes yet
+            if gpu_memory_usage > memory_threshold and not using_shared_memory:
+                # We're likely using shared memory
+                using_shared_memory = True
+                
+                # Reduce batch sizes by 50%
+                current_user_batch_size = max(32, current_user_batch_size // 2)
+                current_item_batch_size = max(1024, current_item_batch_size // 2)
+                
+                print(f"High memory usage detected! Reduced batch sizes: users={current_user_batch_size}, items={current_item_batch_size}")
+                
+                # Clear cache
+                torch.cuda.empty_cache()
+                gc.collect()
+            
+            # If memory usage has decreased and we previously reduced batch sizes
+            elif gpu_memory_usage < memory_threshold * 0.7 and using_shared_memory:
+                # We can try increasing batch sizes again (being conservative)
+                using_shared_memory = False
+                
+                # Increase batch sizes, but not above initial values
+                current_user_batch_size = min(user_batch_size, int(current_user_batch_size * 1.5))
+                current_item_batch_size = min(item_batch_size, int(current_item_batch_size * 1.5))
+                
+                print(f"Memory usage has decreased. Increased batch sizes: users={current_user_batch_size}, items={current_item_batch_size}")
+            
+            return int(current_user_batch_size), int(current_item_batch_size)
         
         with torch.no_grad():
-            # Process users in batches
-            for i in range(0, num_users, user_batch_size):
-                batch_users_np = users_np[i:i+user_batch_size]
+            # Process users in dynamically sized batches
+            i = 0
+            while i < num_users:
+                # Process the next batch of users with current batch size
+                end_idx = min(i + current_user_batch_size, num_users)
+                batch_users_np = users_np[i:end_idx]
                 batch_size = len(batch_users_np)
-                batch_num = i // user_batch_size + 1
+                batch_num = i // current_user_batch_size + 1
+                total_batches = (num_users - 1) // current_user_batch_size + 1
                 
-                print(f'Processing user batch {batch_num}/{num_batches} ({batch_size} users)')
+                print(f'Processing user batch {batch_num}/{total_batches} ({batch_size} users)')
                 
                 users_tensor = torch.tensor(batch_users_np, dtype=torch.long, device=self.device)
                 
-                # Allocate scores tensor for this batch
-                all_scores_gpu = torch.zeros((batch_size, num_items), device=self.device)
+                # Allocate scores tensor
+                all_scores = torch.zeros((batch_size, num_items), device=self.device)
                 
-                # Process items in batches
-                for j in range(0, num_items, item_batch_size):
+                # Process items in dynamically sized batches
+                j = 0
+                current_item_batch_size = item_batch_size  # Initialize to the starting value
+                while j < num_items:
+                    try:
+                        # Get current item batch
+                        end_item_idx = min(j + current_item_batch_size, num_items)
+                        batch_items = items[j:end_item_idx]
+                        item_batch_size_actual = len(batch_items)
                         
-                    batch_items = items[j:j+item_batch_size]
-                    item_batch_size_actual = len(batch_items)
-                    
-                    # Create user-item pairs
-                    users_matrix = users_tensor.repeat_interleave(item_batch_size_actual)
-                    items_matrix = batch_items.repeat(batch_size)
-                    
-                    # Make predictions
-                    batch_scores = self.model(users_matrix, items_matrix)
-                    
-                    # Reshape and store scores
-                    batch_scores = batch_scores.view(batch_size, item_batch_size_actual)
-                    all_scores_gpu[:, j:j+item_batch_size_actual] = batch_scores
-                    
-                    # Clean up intermediate tensors
-                    del users_matrix, items_matrix, batch_scores
+                        item_batch_num = j // current_item_batch_size + 1
+                        total_item_batches = (num_items - 1) // current_item_batch_size + 1
+                        
+                        if batch_num == 1:  # Only print for first user batch
+                            print(f'  - Item batch {item_batch_num}/{total_item_batches}')
+                        
+                        # Create user-item pairs
+                        users_matrix = users_tensor.repeat_interleave(item_batch_size_actual)
+                        items_matrix = batch_items.repeat(batch_size)
+                        
+                        # Make predictions
+                        batch_scores = self.model(users_matrix, items_matrix)
+                        
+                        # Reshape and store scores
+                        batch_scores = batch_scores.view(batch_size, item_batch_size_actual)
+                        all_scores[:, j:end_item_idx] = batch_scores
+                        
+                        # Measure memory usage AFTER predictions are made and BEFORE cleanup
+                        # This gives us the most accurate picture of peak memory usage
+                        _, item_batch = adjust_batch_sizes()
+                        current_item_batch_size = item_batch
+                        
+                        # Clean up intermediate tensors
+                        del users_matrix, items_matrix, batch_scores
+                        
+                        # Move to next item batch
+                        j = end_item_idx
+                        
+                    except RuntimeError as e:
+                        # If we hit CUDA out of memory error
+                        if "CUDA out of memory" in str(e):
+                            # Drastically reduce item batch size and retry
+                            current_item_batch_size = max(128, current_item_batch_size // 4)
+                            print(f"CUDA OOM error! Reduced item batch size to {current_item_batch_size}")
+                            
+                            # Clear memory and retry
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                        else:
+                            # If it's another error, re-raise it
+                            raise e
                 
-                # Store predictions for this batch of users
+                # Process and store predictions for each user in this batch
                 for idx, user_id in enumerate(batch_users_np):
-                    # Get the user's scores and convert to numpy right away
-                    user_scores = all_scores_gpu[idx].cpu().numpy()
+                    # Get scores and convert to numpy
+                    user_scores = all_scores[idx].cpu().numpy()
                     
-                    # Find top-k items using argpartition (much faster than argsort for just finding top-k)
+                    # Find top-k items
                     top_k_indices = np.argpartition(user_scores, -k)[-k:]
-                    # Sort just the top k items by score
                     top_k_indices = top_k_indices[np.argsort(-user_scores[top_k_indices])]
                     
-                    # Store only the top-k indices, not the full score array
+                    # Store only top-k indices
                     predictions[user_id] = top_k_indices.tolist()
                     
-                    # Clean up user scores to free memory immediately
+                    # Clean up
                     del user_scores
                 
-                # Clean up
-                del all_scores_gpu, users_tensor
+                # Clean up batch data
+                del all_scores, users_tensor
                 torch.cuda.empty_cache()
                 gc.collect()
+                
+                # Measure memory and adjust user batch size AFTER processing a complete user batch
+                user_batch, _ = adjust_batch_sizes()
+                current_user_batch_size = user_batch
+                
+                # Move to next user batch
+                i = end_idx
         
         return predictions
     

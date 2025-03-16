@@ -13,6 +13,7 @@ Baseline Models/Content-Based Filtering/*.json
 MultimodalNeuralCollaborativeFiltering/__pycache__
 neural-collaborative-filtering/__pycache__
 neural-collaborative-filtering/models
+neural-collaborative-filtering/playground.ipynb
 
 Cleaned
 Cleaned ID
