@@ -1,2 +1,5 @@
 __pycache__
 models
+tuning_results
+data
+performance
