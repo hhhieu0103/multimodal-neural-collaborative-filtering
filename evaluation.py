@@ -1,15 +1,29 @@
 import numpy as np
+import pandas as pd
 import torch
+from recom_ncf import NCFRecommender
 
 class Evaluation():
-    def __init__(self, recommender=None, test_data=None, max_k=50, predictions=None, ground_truth=None):
+    def __init__(
+        self,
+        recommender: NCFRecommender,
+        test_data: pd.DataFrame,
+        df_metadata: pd.DataFrame,
+        time_feature='timestamp',
+        metadata_features=[],
+        max_k=50
+    ):
         self.recommender = recommender
         self.test_data = test_data
-        self.predictions = predictions
-        self.ground_truth = ground_truth
         self.max_k = max_k
+        self.time_feature = time_feature
+        self.predictions = None
+        self.ground_truth = None
         
-    def predict_create_ground_truth(self, k, user_batch_size, item_batch_size):
+        self.df_metadata = df_metadata
+        self.metadata_features = metadata_features
+        
+    def predict_create_ground_truth(self, user_batch_size, item_batch_size):
         import gc  # For garbage collection
         
         print("Starting evaluation preparation...")
@@ -20,24 +34,34 @@ class Evaluation():
         print(f"Creating ground truth sets for {len(test_unique_users)} users...")
         # Create ground truth efficiently using NumPy arrays
         user_array = self.test_data['user_idx'].values
-        item_array = self.test_data['item_idx'].values
         
         # Find unique users and create ground truth sets
         unique_users = np.unique(user_array)
         
-        for i, user in enumerate(unique_users):
-            self.ground_truth[user] = set(item_array[user_array == user])
+        self.ground_truth = self.test_data.groupby('user_idx')['item_idx'].apply(set).to_dict()
+        
+        print("Getting most recent timestamps for each user...")        
+        timestamp_array = self.test_data[self.time_feature].values    
+        latest_timestamps = {}
+        for i in range(len(user_array)):
+            user = user_array[i]
+            timestamp = timestamp_array[i]
+            if user not in latest_timestamps or timestamp > latest_timestamps[user]:
+                latest_timestamps[user] = timestamp
+        timestamps = [latest_timestamps.get(user, 0) for user in unique_users]
         
         print("Generating predictions...")
         # Get predictions for all users - this now returns only the top-K indices directly
-        self.predictions = self.recommender.batch_predict_for_users(test_unique_users, k=k, user_batch_size=user_batch_size, item_batch_size=item_batch_size)
+        # self.predictions = self.recommender.batch_predict_for_users(test_unique_users, timestamps, df_metadata=self.df_metadata, metadata_features=self.metadata_features, k=self.max_k, user_batch_size=user_batch_size, item_batch_size=item_batch_size)
+        self.predictions = self.recommender.batch_predict_for_users(test_unique_users, timestamps, df_metadata=self.df_metadata, metadata_features=self.metadata_features, k=self.max_k)
+        
         
         # Since the recommender now returns the top-K indices directly, we don't need to process them further
         print("Evaluation preparation complete!")
         gc.collect()
         torch.cuda.empty_cache()
     
-    def evaluate(self, k=10, user_batch_size=1024, item_batch_size=8192):
+    def evaluate(self, k=10, user_batch_size=512, item_batch_size=4096):
         """
         Evaluate the model using the specified metrics.
         
@@ -47,7 +71,7 @@ class Evaluation():
         import gc
         
         if self.predictions is None or self.ground_truth is None:
-            self.predict_create_ground_truth(k, user_batch_size=user_batch_size, item_batch_size=item_batch_size)
+            self.predict_create_ground_truth(user_batch_size=user_batch_size, item_batch_size=item_batch_size)
             
         if k > self.max_k:
             print(f'The predictions were made with k={self.max_k}. The evaluation metrics can only be calculated with k <= {self.max_k}. The k parameter is {k}, which exceeds the max k value. Falling back to k={self.max_k}')

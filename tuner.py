@@ -17,18 +17,24 @@ class NCFTuner:
         train_data,
         val_data,
         test_data,
+        metadata,
         unique_users,
         unique_items,
+        time_features=['timestamp'],
+        metadata_features=[],
         k_values=[50, 20, 10],
         results_dir='tuning_results'
     ):
         self.train_data = train_data
         self.val_data = val_data
         self.test_data = test_data
+        self.metadata = metadata
         self.unique_users = unique_users
         self.unique_items = unique_items
         self.results_dir = results_dir
         self.k_values = k_values
+        self.time_features = time_features
+        self.metadata_features = metadata_features
         
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
@@ -36,14 +42,16 @@ class NCFTuner:
         # Default parameter grid
         self.param_grid = {
             'factors': [8, 16, 32, 64],
-            'layers': [[64, 32, 16, 8], [128, 64, 32, 16]],
+            'mlp_user_item_dim': [32, 64, 128],
+            'mlp_time_dim': [4, 8, 16],
+            'mlp_metadata_embedding_dims': [[8, 8, 8], [16, 16, 16], [32, 32, 32]],
             'learning_rate': [0.0001, 0.001, 0.01],
-            'epochs': [10, 20, 50],
-            'batch_size': [4096, 8192, 16384],
+            'epochs': [1],
             'optimizer': ['sgd', 'adam', 'adagrad'],
             'dropout': [0.0, 0.2, 0.5],
             'weight_decay': [0.0, 0.0001, 0.00001],
-            'loss_fn': ['bce', 'mse', 'bpr']
+            'loss_fn': ['bce', 'mse', 'bpr'],
+            'time_features': self.time_features
         }
         
     def update_param_grid(self, param_grid):
@@ -59,26 +67,38 @@ class NCFTuner:
             unique_users=self.unique_users,
             unique_items=self.unique_items,
             factors=params['factors'],
-            layers=params['layers'],
+            mlp_user_item_dim=params['mlp_user_item_dim'],
+            mlp_time_dim=params['mlp_time_dim'],
+            mlp_metadata_embedding_dims=params['mlp_metadata_embedding_dims'],
             learning_rate=params['learning_rate'],
             epochs=params['epochs'],
             optimizer=params['optimizer']
         )
         
         # Create data loaders
-        train_dataset = NCFDataset(self.train_data)
-        val_dataset = NCFDataset(self.val_data)
+        train_dataset = NCFDataset(
+            df=self.train_data,
+            time_feature=params['time_features'],
+            df_metadata=self.metadata,
+            metadata_features=self.metadata_features
+        )
+        val_dataset = NCFDataset(
+            df=self.train_data,
+            time_feature=params['time_features'],
+            df_metadata=self.metadata,
+            metadata_features=self.metadata_features
+        )
         
         train_loader = DataLoader(
             train_dataset, 
-            batch_size=params['batch_size'], 
-            shuffle=True
+            batch_size=16384, 
+            shuffle=True, num_workers=4, persistent_workers=True, prefetch_factor=2, pin_memory=True
         )
         
         val_loader = DataLoader(
             val_dataset, 
-            batch_size=params['batch_size'], 
-            shuffle=False
+            batch_size=16384, 
+            shuffle=False, num_workers=4, persistent_workers=True, prefetch_factor=2, pin_memory=True
         )
         
         # Train the model
@@ -89,12 +109,17 @@ class NCFTuner:
         evaluator = Evaluation(
             recommender=model,
             test_data=self.test_data,
-            max_k=max(self.k_values)
+            df_metadata=self.metadata,
+            max_k=max(self.k_values),
+            time_feature=params['time_features'],
+            metadata_features=self.metadata_features
         )
         for k in self.k_values:
             metrics = evaluator.evaluate(k)
             eval_results[f'k={k}'] = metrics
             
+        print(eval_results)
+        
         # Save the training losses
         eval_results['train_loss'] = model.train_losses
         eval_results['val_loss'] = model.val_losses
@@ -163,32 +188,17 @@ class NCFTuner:
             # Sample random parameters
             params = {}
             for key, values in self.param_grid.items():
-                # Handle different parameter types appropriately
-                if isinstance(values, list):
-                    if len(values) == 0:
-                        continue
-                        
-                    # Check if this is a list of lists (like layer configurations)
-                    if isinstance(values[0], list):
-                        # Select one full configuration
-                        idx = np.random.randint(0, len(values))
-                        params[key] = values[idx]
-                    else:
-                        # For regular parameters (factors, learning_rate, etc.)
-                        idx = np.random.randint(0, len(values))
-                        params[key] = values[idx]
-                else:
-                    # For any non-list parameter (unlikely but possible)
-                    params[key] = values
-            
-            # Convert params to a hashable representation for the set
-            # Note: For lists we need to convert to tuple to make them hashable
+                if len(values) == 0:
+                    continue
+                
+                idx = np.random.randint(0, len(values))
+                params[key] = values[idx]  
+        
             params_hashable = tuple(
-                (k, tuple(v) if isinstance(v, list) else v) 
+                (k, tuple(v)) if isinstance(v, list) else (k, v)
                 for k, v in sorted(params.items())
             )
             
-            # Skip if we've already tried this configuration
             if prevent_duplicates and params_hashable in tried_configs:
                 continue
                 
@@ -310,9 +320,9 @@ class NCFTuner:
         # Plot heatmaps for parameters and metrics
         plt.figure(figsize=(15, 10))
         
-        for i, param in enumerate(['factors', 'learning_rate', 'batch_size']):
+        for i, param in enumerate(['factors', 'time_features', 'mlp_metadata_embedding_dims', 'learning_rate']):
             for j, metric in enumerate(['Hit Ratio@10', 'NDCG@10', 'Recall@10']):
-                plt.subplot(3, 3, i*3 + j + 1)
+                plt.subplot(5, 3, i*3 + j + 1)
                 pivot = df.pivot_table(
                     index=param,
                     values=metric,
