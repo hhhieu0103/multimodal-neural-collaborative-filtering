@@ -72,10 +72,10 @@ class Evaluation:
         print("Creating ground truth sets...")
         start_time = time()
 
-        # Group by user_idx and convert to a dictionary of sets
+        # Group by user_id and convert to a dictionary of sets
         self.ground_truth = {}
-        for user, group in self.test_data.groupby('user_idx'):
-            self.ground_truth[user] = set(group['item_idx'].values)
+        for user, group in self.test_data.groupby('user_id'):
+            self.ground_truth[user] = set(group['item_id'].values)
 
         num_users = len(self.ground_truth)
         avg_items = sum(len(items) for items in self.ground_truth.values()) / max(1, num_users)
@@ -100,7 +100,7 @@ class Evaluation:
         start_time = time()
 
         # Use groupby to efficiently find maximum timestamp for each user
-        latest_timestamps = self.test_data.groupby('user_idx')[self.time_feature].max()
+        latest_timestamps = self.test_data.groupby('user_id')[self.time_feature].max()
 
         # Create a list of timestamps in the same order as test_unique_users
         timestamps = [latest_timestamps.get(user, 0) for user in test_unique_users]
@@ -293,12 +293,12 @@ class Evaluation:
         hits = 0
         total_users = len(self.ground_truth)
 
-        for user_idx, true_items in self.ground_truth.items():
-            if user_idx not in self.predictions:
+        for user_id, true_items in self.ground_truth.items():
+            if user_id not in self.predictions:
                 continue
 
             # Get top-k recommendations for this user
-            recommended_items = self.predictions[user_idx][:k]
+            recommended_items = self.predictions[user_id][:k]
 
             # Check if any true items appear in the recommendations
             if any(item in true_items for item in recommended_items):

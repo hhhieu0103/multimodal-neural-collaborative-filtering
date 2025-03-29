@@ -3,38 +3,36 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 
-
-class NCFDataset(Dataset):
+class NCFTestDataset(Dataset):
     def __init__(
             self,
             df_interaction: pd.DataFrame,
+            items: list,
             time_feature: str | None = None,
             df_metadata: pd.DataFrame = None,
             metadata_features: list | None = None,
     ):
         """
-        Dataset for NCF model with support for time features and metadata.
+        Create a dataset for testing NCF model with support for time features and metadata.
 
         Args:
-            df_interaction: Interaction dataframe with user_idx, item_idx, and rating columns
+            df_interaction: The actual interaction dataframe with user_idx, item_idx, and rating, and timestamp columns
+            items: List of item indices to include in the dataset (None to include all items)
             time_feature: Name of the time feature column (None to disable)
-            df_metadata: Item metadata dataframe (indexed by item_idx)
+            df_metadata: Item metadata dataframe
             metadata_features: List of metadata feature columns to use
         """
-        users = df_interaction.iloc[:, 0].values
-        items = df_interaction.iloc[:, 1].values
-        ratings = df_interaction.iloc[:, 2].values
 
-        # Ensure indices are properly cast as integers
-        self.users = torch.tensor(users, dtype=torch.long)
-        self.items = torch.tensor(items, dtype=torch.long)
-        self.ratings = torch.tensor(ratings, dtype=torch.float32)
+        unique_users = df_interaction.iloc[:, 0].unique()
+        self.users = torch.tensor(unique_users, dtype=torch.long).repeat(len(items))
+        self.items = torch.tensor(items, dtype=torch.long).repeat_interleave(len(unique_users))
 
         # Time feature handling
         self.use_time = time_feature is not None
         if self.use_time:
-            timestamps = df_interaction[time_feature].values
-            self.timestamps = torch.tensor(timestamps, dtype=torch.float32)
+            latest_timestamps = df_interaction.groupby('user_id')[time_feature].max()
+            timestamps = [latest_timestamps.get(user, 0) for user in unique_users]
+            self.timestamps = torch.tensor(timestamps, dtype=torch.float32).repeat(len(items))
 
         # Metadata feature handling
         self.use_metadata = df_metadata is not None and metadata_features is not None
@@ -44,7 +42,7 @@ class NCFDataset(Dataset):
 
             # Process metadata if provided
             if df_metadata is not None and metadata_features:
-                # Ensure metadata is indexed by item_idx
+                # Ensure metadata is indexed by item_id
                 if df_metadata.index.name != 'item_id' and 'item_id' in df_metadata.columns:
                     df_metadata = df_metadata.set_index('item_id')
 
@@ -93,7 +91,7 @@ class NCFDataset(Dataset):
                         feature=feature,
                         df_metadata=df_metadata,
                         feature_dim=dim
-                    )
+                    ).repeat_interleave(len(unique_users))
                     if tensor is not None:
                         self.metadata.append(tensor)
 
@@ -190,14 +188,14 @@ class NCFDataset(Dataset):
         """Get a single interaction with its features"""
         if self.use_time and self.use_metadata:
             metadata_idx = [feature[idx] for feature in self.metadata] if self.metadata else []
-            return self.users[idx], self.items[idx], self.ratings[idx], self.timestamps[idx], metadata_idx
+            return self.users[idx], self.items[idx], self.timestamps[idx], metadata_idx
 
         elif self.use_time and not self.use_metadata:
-            return self.users[idx], self.items[idx], self.ratings[idx], self.timestamps[idx]
+            return self.users[idx], self.items[idx], self.timestamps[idx]
 
         elif not self.use_time and self.use_metadata:
             metadata_idx = [feature[idx] for feature in self.metadata] if self.metadata else []
-            return self.users[idx], self.items[idx], self.ratings[idx], metadata_idx
+            return self.users[idx], self.items[idx], metadata_idx
 
         elif not self.use_time and not self.use_metadata:
-            return self.users[idx], self.items[idx], self.ratings[idx]
+            return self.users[idx], self.items[idx]

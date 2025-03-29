@@ -176,6 +176,8 @@ class NCFRecommender:
             users, items, ratings, timestamps = data_batch
         elif not self.use_time and self.use_metadata:
             users, items, ratings, metadata = data_batch
+        else:
+            users, items, ratings = data_batch
 
         users = users.to(self.device)
         items = items.to(self.device)
