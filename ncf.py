@@ -9,9 +9,9 @@ class NCF(nn.Module):
         num_items,
         factors=8,
         mlp_user_item_dim=32,
-        mlp_time_dim=8,
-        mlp_metadata_feature_dims=[],
-        mlp_metadata_embedding_dims=[],
+        mlp_time_dim=None,
+        mlp_metadata_feature_dims=None,
+        mlp_metadata_embedding_dims=None,
         num_mlp_layers=4,
         layers_ratio=2,
         dropout=0
@@ -24,20 +24,26 @@ class NCF(nn.Module):
         
         self.mlp_user_embedding = nn.Embedding(num_users, mlp_user_item_dim)
         self.mlp_item_embedding = nn.Embedding(num_items, mlp_user_item_dim)
-        
-        self.time_embedding = nn.Linear(1, mlp_time_dim)
-        
+        mlp_input_size = mlp_user_item_dim * 2
+
+        self.use_time = mlp_time_dim is not None
+        if self.use_time:
+            self.time_embedding = nn.Linear(1, mlp_time_dim)
+            mlp_input_size += mlp_time_dim
+
+        self.use_metadata = mlp_metadata_feature_dims is not None and mlp_metadata_embedding_dims is not None
         # Metadata projection layers
-        self.metadata_projection_layers = nn.ModuleList()
-        for (feature_dim, embed_dim) in zip(mlp_metadata_feature_dims, mlp_metadata_embedding_dims):
-            self.metadata_projection_layers.append(nn.Linear(feature_dim, embed_dim))
-        total_metadata_embedding_dim = sum(mlp_metadata_embedding_dims)
+        if self.use_metadata:
+            self.metadata_projection_layers = nn.ModuleList()
+            for (feature_dim, embed_dim) in zip(mlp_metadata_feature_dims, mlp_metadata_embedding_dims):
+                self.metadata_projection_layers.append(nn.Linear(feature_dim, embed_dim))
+            mlp_input_size += sum(mlp_metadata_embedding_dims)
 
         # MLP layers
         self.dropout = dropout
         self.mlp_layers = nn.ModuleList()
-        
-        mlp_input_size = mlp_user_item_dim * 2 + mlp_time_dim + total_metadata_embedding_dim
+
+        mlp_output_size = 0
         for i in range(0, num_mlp_layers):
             mlp_output_size = int(mlp_input_size/layers_ratio)
             self.mlp_layers.append(nn.Linear(mlp_input_size, mlp_output_size))
@@ -54,12 +60,13 @@ class NCF(nn.Module):
         mlp_item_embed = self.mlp_item_embedding(item)
         mlp_vector = torch.cat([mlp_user_embed, mlp_item_embed], dim=-1)
 
-        timestamp = timestamp.float().unsqueeze(1) if timestamp.dim() == 1 else timestamp
-        time_embed = self.time_embedding(timestamp)
-        mlp_vector = torch.cat([mlp_vector, time_embed], dim=-1)
+        if self.use_time and timestamp is not None:
+            timestamp = timestamp.float().unsqueeze(1) if timestamp.dim() == 1 else timestamp
+            time_embed = self.time_embedding(timestamp)
+            mlp_vector = torch.cat([mlp_vector, time_embed], dim=-1)
 
-        metadata_embeds = []
-        if metadata:  # Check if metadata is provided
+        if self.use_metadata and metadata is not None:
+            metadata_embeds = []
             for i, (feature_values, projection_layer) in enumerate(zip(metadata, self.metadata_projection_layers)):
                 if feature_values is not None:  # Check if feature values exist
                     # Ensure feature_values has the right shape
@@ -87,9 +94,9 @@ class NCF(nn.Module):
                               f"Projection layer weight shape: {projection_layer.weight.shape}")
                         raise e
 
-        if metadata_embeds:
-            metadata_vector = torch.cat(metadata_embeds, dim=-1)
-            mlp_vector = torch.cat([mlp_vector, metadata_vector], dim=-1)
+            if metadata_embeds:
+                metadata_vector = torch.cat(metadata_embeds, dim=-1)
+                mlp_vector = torch.cat([mlp_vector, metadata_vector], dim=-1)
 
         for layer in self.mlp_layers:
             mlp_vector = F.relu(layer(mlp_vector))
@@ -97,7 +104,7 @@ class NCF(nn.Module):
                 mlp_vector = F.dropout(mlp_vector, p=self.dropout, training=self.training)
 
         vector = torch.cat([mf_vector, mlp_vector], dim=-1)
-        logits = self.prediction(vector)
-        output = torch.sigmoid(logits)
+        logit = self.prediction(vector)
+        output = torch.sigmoid(logit)
 
         return output.view(-1)

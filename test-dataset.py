@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 
-
-class NCFDataset(Dataset):
+class NCFTestDataset(Dataset):
     def __init__(
             self,
             df_interaction: pd.DataFrame,
@@ -14,11 +13,9 @@ class NCFDataset(Dataset):
     ):
         users = df_interaction.iloc[:, 0].values
         items = df_interaction.iloc[:, 1].values
-        ratings = df_interaction.iloc[:, 2].values
 
         self.users = torch.tensor(users, dtype=torch.long)
         self.items = torch.tensor(items, dtype=torch.long)
-        self.ratings = torch.tensor(ratings, dtype=torch.float32)
 
         self.use_time = time_feature is not None
         if self.use_time:
@@ -124,14 +121,14 @@ class NCFDataset(Dataset):
 
         if self.use_time and self.use_metadata:
             metadata_idx = [feature[idx] for feature in self.metadata] if self.metadata else []
-            return self.users[idx], self.items[idx], self.ratings[idx], self.timestamps[idx], metadata_idx
+            return self.users[idx], self.items[idx], self.timestamps[idx], metadata_idx
 
         elif self.use_time and not self.use_metadata:
-            return self.users[idx], self.items[idx], self.ratings[idx], self.timestamps[idx]
+            return self.users[idx], self.items[idx], self.timestamps[idx]
 
         elif not self.use_time and self.use_metadata:
             metadata_idx = [feature[idx] for feature in self.metadata] if self.metadata else []
-            return self.users[idx], self.items[idx], self.ratings[idx], metadata_idx
+            return self.users[idx], self.items[idx], metadata_idx
 
         elif not self.use_time and not self.use_metadata:
-            return self.users[idx], self.items[idx], self.ratings[idx]
+            return self.users[idx], self.items[idx]

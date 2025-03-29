@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 from ncf import NCF
 import numpy as np
 import pandas as pd
+import gc
+from time import time
 
 class BPRLoss(nn.Module):
     def __init__(self):
@@ -14,16 +16,16 @@ class BPRLoss(nn.Module):
         loss = -torch.mean(torch.log(torch.sigmoid(positive_predictions - negative_predictions)))
         return loss
 
-class NCFRecommender():
+class NCFRecommender:
     def __init__(
         self,
         unique_users,
         unique_items,
         factors=8,
         mlp_user_item_dim=32,
-        mlp_time_dim=8,
-        mlp_metadata_feature_dims=[],
-        mlp_metadata_embedding_dims=[],
+        mlp_time_dim=None,
+        mlp_metadata_feature_dims=None,
+        mlp_metadata_embedding_dims=None,
         num_mlp_layers=4,
         layers_ratio=2,
         learning_rate=0.001,
@@ -34,8 +36,10 @@ class NCFRecommender():
         optimizer='sgd',
         early_stopping_patience=5,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        ):
+    ):
         
+        self.val_losses = None
+        self.train_losses = None
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.device = device
@@ -46,6 +50,9 @@ class NCFRecommender():
         
         self.unique_users = torch.tensor(unique_users)
         self.unique_items = torch.tensor(unique_items)
+
+        self.use_time = mlp_time_dim is not None
+        self.use_metadata = mlp_metadata_feature_dims is not None and mlp_metadata_embedding_dims is not None
         
         self.model = NCF(
             num_users=len(unique_users),
@@ -61,21 +68,21 @@ class NCFRecommender():
         ).to(self.device)
         
     def get_loss_function(self):
-        if (self.loss_fn == 'bce'):
+        if self.loss_fn == 'bce':
             return nn.BCELoss()
-        elif (self.loss_fn == 'mse'):
+        elif self.loss_fn == 'mse':
             return nn.MSELoss()
-        elif (self.loss_fn == 'bpr'):
+        elif self.loss_fn == 'bpr':
             return BPRLoss()
         else:
             raise ValueError(f'Unsupported loss function: {self.loss_fn}')
     
     def get_optimizer(self):
-        if (self.optimizer == 'sgd'):
+        if self.optimizer == 'sgd':
             return optim.SGD(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        elif (self.optimizer == 'adam'):
+        elif self.optimizer == 'adam':
             return optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        elif (self.optimizer == 'adagrad'):
+        elif self.optimizer == 'adagrad':
             return optim.Adagrad(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         else:
             raise ValueError(f'Unsupported optimizer: {self.optimizer}')
@@ -127,13 +134,9 @@ class NCFRecommender():
         total_loss = 0
         num_batches = 0
         
-        for users, items, ratings, timestamps, metadata in train_data:
-            users = users.to(self.device)
-            items = items.to(self.device)
-            ratings = ratings.to(self.device)
-            timestamps = timestamps.to(self.device)
-            metadata = [feature.to(self.device) for feature in metadata]
-            
+        for data_batch in train_data:
+            users, items, ratings, timestamps, metadata = self.__move_data_to_device(data_batch)
+
             optimizer.zero_grad()
 
             predictions = self.model(users, items, timestamps, metadata)
@@ -153,12 +156,8 @@ class NCFRecommender():
         num_batches = 0
 
         with torch.no_grad():
-            for users, items, ratings, timestamps, metadata in val_data:
-                users = users.to(self.device)
-                items = items.to(self.device)
-                ratings = ratings.to(self.device)
-                timestamps = timestamps.to(self.device)
-                metadata = [feature.to(self.device) for feature in metadata]
+            for data_batch in val_data:
+                users, items, ratings, timestamps, metadata = self.__move_data_to_device(data_batch)
                 
                 predictions = self.model(users, items, timestamps, metadata)
                 loss = loss_fn(predictions, ratings)
@@ -167,6 +166,33 @@ class NCFRecommender():
                 num_batches += 1
                 
         return total_loss / num_batches
+
+    def __move_data_to_device(self, data_batch):
+        users, items, ratings, timestamps, metadata = None, None, None, None, None
+
+        if self.use_time and self.use_metadata:
+            users, items, ratings, timestamps, metadata = data_batch
+        elif self.use_time and not self.use_metadata:
+            users, items, ratings, timestamps = data_batch
+        elif not self.use_time and self.use_metadata:
+            users, items, ratings, metadata = data_batch
+
+        users = users.to(self.device)
+        items = items.to(self.device)
+        ratings = ratings.to(self.device)
+
+        if self.use_time and timestamps is not None:
+            timestamps = timestamps.to(self.device)
+        else:
+            timestamps = None
+
+        metadata_on_device = None
+        if self.use_metadata and metadata is not None:
+            metadata_on_device = []
+            for feature in metadata:
+                metadata_on_device.append(feature.to(self.device))
+
+        return users, items, ratings, timestamps, metadata_on_device
     
     def predict(
         self,
@@ -179,357 +205,440 @@ class NCFRecommender():
         
         if not isinstance(users, torch.Tensor):
             users = torch.tensor(users, dtype=torch.long)
+
         if not isinstance(items, torch.Tensor):
             items = torch.tensor(items, dtype=torch.long)
-        if not isinstance(timestamps, torch.Tensor):
-            timestamps = torch.tensor(timestamps, dtype=torch.float32)
-            
+
         users = users.to(self.device)
         items = items.to(self.device)
-        timestamps = timestamps.to(self.device)
-        
-        for feature in metadata:
-            if not isinstance(feature, torch.Tensor):
-                feature = torch.tensor(feature, dtype=torch.float32)
-            feature = feature.to(self.device)
+
+        if self.use_time and not isinstance(timestamps, torch.Tensor):
+            timestamps = torch.tensor(timestamps, dtype=torch.float32)
+            timestamps = timestamps.to(self.device)
+
+        metadata_tensors = None
+        if self.use_metadata and metadata is not None:
+            metadata_tensors = []
+            for feature in metadata:
+                if not isinstance(feature, torch.Tensor):
+                    feature = torch.tensor(feature, dtype=torch.float32)
+                metadata_tensors.append(feature.to(self.device))
         
         with torch.no_grad():
-            predictions = self.model(users, items, timestamps, metadata)
+            predictions = self.model(users, items, timestamps, metadata_tensors)
             
         return predictions.cpu()
 
     def batch_predict_for_users(
             self,
             users: torch.Tensor | np.ndarray,
-            timestamps: torch.Tensor | np.ndarray,
-            df_metadata: pd.DataFrame = None,
-            metadata_features=[],
+            timestamps: torch.Tensor | np.ndarray | None = None,
+            df_metadata: pd.DataFrame | None = None,
+            metadata_features=None,
             items: torch.Tensor | np.ndarray | None = None,
             k=10,
             user_batch_size=1024,
-            item_batch_size=4096,
-            memory_threshold=0.95  # GPU memory utilization threshold (0-1)
+            item_batch_size=8096,
     ):
         """
-        Generate predictions for all items for each user with dynamic batch size adjustment
-        based on GPU memory usage to avoid expensive shared memory operations
+        Generate predictions for all items for each user, with dynamic batch size adjustment
+        to optimize GPU memory usage.
 
         Args:
             users: List or array of user IDs
-            timestamps: Timestamps for each user
+            timestamps: Timestamps for each user (optional, used if model supports time)
             df_metadata: DataFrame containing metadata features for items
             metadata_features: List of metadata feature column names to use
-            items: Optional tensor of item IDs. If None, all items are used.
-            k: Number of top items to retain per user
+            items: Optional tensor of item IDs. If None, all items are used
+            k: Number of top items to retrieve per user
             user_batch_size: Initial number of users to process in each batch
             item_batch_size: Initial number of items to process in each batch
-            memory_threshold: GPU memory utilization threshold (0-1) to trigger batch size reduction
 
         Returns:
             Dictionary mapping user IDs to lists of top-k item indices
         """
-        import gc
-        from time import time
-
+        # Step 1: Setup and initialization
         self.model.eval()
         predictions = {}
+        start_time = time()
 
-        # Convert users to numpy for iteration if needed
-        if isinstance(users, torch.Tensor):
-            users_np = users.cpu().numpy()
-        else:
-            users_np = np.array(users)
+        # Process input data to standard formats
+        users_np = self._convert_to_numpy(users)
+        timestamps_np = self._process_timestamps(timestamps)
+        items = self._setup_items_tensor(items)
 
-        if isinstance(timestamps, torch.Tensor):
-            timestamps_np = timestamps.cpu().numpy()
-        else:
-            timestamps_np = np.array(timestamps)
-
-        # Setup item tensor on device
-        if items is None:
-            items = torch.arange(len(self.unique_items), device=self.device)
-        elif not isinstance(items, torch.Tensor):
-            items = torch.tensor(items, dtype=torch.long, device=self.device)
-
+        # Get dimensions
         num_users = len(users_np)
         num_items = len(items)
 
-        # Current batch sizes (will be adjusted dynamically)
+        # Initialize batch sizes (will be adjusted dynamically)
         current_user_batch_size = user_batch_size
         current_item_batch_size = item_batch_size
-
-        # Track if we're using shared memory
         using_shared_memory = False
 
         print(f"Processing predictions for {num_users} users and {num_items} items")
-        print(f"Initial batch sizes - Users: {current_user_batch_size}, Items: {current_item_batch_size}")
 
-        # Precompute metadata features for all items
-        metadata_cache = {}
-        if df_metadata is not None and len(metadata_features) > 0:
-            print("Precomputing metadata features...")
+        # Step 2: Precompute metadata features if needed
+        metadata_cache = self._precompute_metadata(df_metadata, metadata_features, items)
 
-            # Ensure df_metadata is indexed by item_idx
-            if 'item_idx' in df_metadata.columns:
-                df_metadata = df_metadata.set_index('item_idx')
-
-            # Create a lookup table for each feature
-            for feature in metadata_features:
-                if feature not in df_metadata.columns:
-                    print(f"Warning: Feature {feature} not found in metadata")
-                    continue
-
-                metadata_cache[feature] = {}
-
-                # Find a valid sample to determine feature dimension
-                sample = None
-                for idx in df_metadata.index:
-                    val = df_metadata.loc[idx, feature]
-                    if val is not None:
-                        sample = val
-                        break
-
-                # Determine feature dimension
-                feature_dim = len(sample) if isinstance(sample, list) else 1
-
-                # Precompute and store all item features
-                for item_id in items.cpu().numpy():
-                    if item_id in df_metadata.index:
-                        val = df_metadata.loc[item_id, feature]
-                        if val is not None:
-                            metadata_cache[feature][item_id] = val
-                        else:
-                            # Handle missing values
-                            metadata_cache[feature][item_id] = [0.0] * feature_dim if feature_dim > 1 else 0.0
-                    else:
-                        # Handle items not in metadata
-                        metadata_cache[feature][item_id] = [0.0] * feature_dim if feature_dim > 1 else 0.0
-
-        # Function to check GPU memory usage
-        def get_gpu_memory_usage():
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # GB
-                allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
-
-                # Estimate total GPU memory - adjust based on your GPU
-                total_gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-
-                gpu_memory_usage = reserved / total_gpu_memory
-                return reserved, allocated, gpu_memory_usage
-            return 0, 0, 0
-
-        # Function to adjust batch sizes based on memory usage
-        def adjust_batch_sizes():
-            nonlocal current_user_batch_size, current_item_batch_size, using_shared_memory
-
-            reserved, allocated, gpu_memory_usage = get_gpu_memory_usage()
-
-            # Print memory stats
-            print(f"GPU Memory: Reserved={reserved:.2f}GB ({gpu_memory_usage * 100:.1f}%), Allocated={allocated:.2f}GB")
-            print(f"Current batch sizes - Users: {current_user_batch_size}, Items: {current_item_batch_size}")
-
-            # Determine if the GPU is close to running out of memory
-            if gpu_memory_usage > memory_threshold and not using_shared_memory:
-                # We're likely using shared memory
-                using_shared_memory = True
-
-                # Reduce batch sizes by 50%
-                current_user_batch_size = max(32, current_user_batch_size // 2)
-                current_item_batch_size = max(1024, current_item_batch_size // 2)
-
-                print(
-                    f"⚠️ High memory usage ({gpu_memory_usage * 100:.1f}%)! Reduced batch sizes: Users={current_user_batch_size}, Items={current_item_batch_size}")
-
-                # Clear cache
-                torch.cuda.empty_cache()
-                gc.collect()
-
-            # If memory usage has decreased and we previously reduced batch sizes
-            elif gpu_memory_usage < memory_threshold * 0.8 and using_shared_memory:
-                # We can try increasing batch sizes again (being conservative)
-                using_shared_memory = False
-
-                current_user_batch_size = min(user_batch_size, int(current_user_batch_size * 1.5))
-                current_item_batch_size = min(item_batch_size, int(current_item_batch_size * 1.5))
-
-                print(
-                    f"🔼 Memory usage has decreased. Increased batch sizes: Users={current_user_batch_size}, Items={current_item_batch_size}")
-
-            return current_user_batch_size, current_item_batch_size
-
+        # Step 3: Process all users in batches
         with torch.no_grad():
-            # Process users in dynamically sized batches
             i = 0
             while i < num_users:
-                # Adjust batch sizes based on current memory usage
-                current_user_batch_size, _ = adjust_batch_sizes()
-
-                # Process the next batch of users
+                # Get the next batch of users
                 end_idx = min(i + current_user_batch_size, num_users)
-                batch_users_np = users_np[i:end_idx]
-                batch_timestamps_np = timestamps_np[i:end_idx]
+                user_batch = users_np[i:end_idx]
+                batch_size = len(user_batch)
 
-                batch_size = len(batch_users_np)
-                batch_num = i // user_batch_size + 1 if user_batch_size > 0 else 1
-                total_batches = (num_users - 1) // user_batch_size + 1 if user_batch_size > 0 else 1
+                # Log progress
+                self._log_user_batch_progress(i // user_batch_size, user_batch, num_users, user_batch_size)
 
-                start_time = time()
-                print(f'Processing user batch {batch_num}/{total_batches} ({batch_size} users)')
+                # Prepare user tensors
+                users_tensor = torch.tensor(user_batch, dtype=torch.long, device=self.device)
 
-                users_tensor = torch.tensor(batch_users_np, dtype=torch.long, device=self.device)
-                timestamps_tensor = torch.tensor(batch_timestamps_np, dtype=torch.float32, device=self.device)
+                # Prepare timestamp tensors if needed
+                timestamps_tensor = None
+                if self.use_time and timestamps_np is not None:
+                    batch_timestamps = timestamps_np[i:end_idx]
+                    timestamps_tensor = torch.tensor(batch_timestamps, dtype=torch.float32, device=self.device)
 
-                # Allocate scores tensor
+                # Initialize tensor to store all scores for this batch
                 all_scores = torch.zeros((batch_size, num_items), device=self.device)
 
-                # Process items in dynamically sized batches
+                # Process items in batches for the current user batch
                 j = 0
                 while j < num_items:
                     try:
-                        # Adjust item batch size based on current memory usage
-                        _, current_item_batch_size = adjust_batch_sizes()
-
-                        # Get current item batch
+                        # Get the current item batch
                         end_item_idx = min(j + current_item_batch_size, num_items)
-                        batch_items = items[j:end_item_idx]
-                        item_batch_size_actual = len(batch_items)
+                        item_batch = items[j:end_item_idx]
 
-                        # Create input tensors efficiently
-                        users_matrix = users_tensor.unsqueeze(1).expand(-1, item_batch_size_actual).reshape(-1)
-                        items_matrix = batch_items.unsqueeze(0).expand(batch_size, -1).reshape(-1)
-                        timestamps_matrix = timestamps_tensor.unsqueeze(1).expand(-1, item_batch_size_actual).reshape(
-                            -1)
+                        # Process the batch of items for all users
+                        batch_scores = self._process_item_batch(
+                            users_tensor,
+                            item_batch,
+                            timestamps_tensor,
+                            metadata_cache,
+                            metadata_features
+                        )
 
-                        # Process metadata features if available
-                        if metadata_cache:
-                            metadata_matrices = []
-                            batch_items_np = batch_items.cpu().numpy()
+                        # Store scores in the all_scores tensor
+                        all_scores[:, j:end_item_idx] = batch_scores
 
-                            for feature in metadata_features:
-                                if feature not in metadata_cache:
-                                    continue
-
-                                # Get feature cache
-                                feature_cache = metadata_cache[feature]
-
-                                # Get all feature values for this batch of items
-                                feature_values = [feature_cache.get(item_id, 0.0) for item_id in batch_items_np]
-
-                                # Convert to tensor efficiently
-                                if isinstance(feature_values[0], list):
-                                    # For categorical features (lists)
-                                    feature_tensor = torch.tensor(feature_values, dtype=torch.float32,
-                                                                  device=self.device)
-
-                                    # Repeat each item's features for all users
-                                    expanded_tensor = feature_tensor.repeat_interleave(batch_size, dim=0)
-                                    metadata_matrices.append(expanded_tensor)
-                                else:
-                                    # For numeric features
-                                    feature_tensor = torch.tensor(feature_values, dtype=torch.float32,
-                                                                  device=self.device)
-
-                                    # Expand to match dimensions
-                                    expanded_tensor = feature_tensor.unsqueeze(0).expand(batch_size, -1).reshape(-1, 1)
-                                    metadata_matrices.append(expanded_tensor)
-                        else:
-                            metadata_matrices = []
-
-                        # Make predictions
-                        batch_predictions = self.model(users_matrix, items_matrix, timestamps_matrix, metadata_matrices)
-
-                        # Reshape predictions to user x item matrix
-                        batch_predictions = batch_predictions.view(batch_size, item_batch_size_actual)
-
-                        # Store in the appropriate slice of the scores tensor
-                        all_scores[:, j:end_item_idx] = batch_predictions
-
-                        # Clean up to save memory
-                        del users_matrix, items_matrix, timestamps_matrix, batch_predictions, metadata_matrices
+                        # Adjust batch sizes based on memory usage (after each item batch)
+                        current_user_batch_size, current_item_batch_size, using_shared_memory = self._adjust_batch_sizes(
+                            current_user_batch_size,
+                            current_item_batch_size,
+                            user_batch_size,
+                            item_batch_size,
+                            using_shared_memory
+                        )
 
                         # Move to next item batch
                         j = end_item_idx
 
                     except RuntimeError as e:
-                        # If we hit CUDA out of memory error
+                        # Handle OOM errors by reducing batch size and retrying
                         if "CUDA out of memory" in str(e):
-                            # Drastically reduce item batch size and retry
-                            current_item_batch_size = max(128, current_item_batch_size // 4)
-                            using_shared_memory = True  # Mark as using shared memory
-
-                            print(f"🚨 CUDA OOM error! Reduced item batch size to {current_item_batch_size}")
-
-                            # Clear memory and retry
-                            torch.cuda.empty_cache()
-                            gc.collect()
+                            current_item_batch_size, using_shared_memory = self._handle_oom_error(
+                                current_item_batch_size
+                            )
+                            # Don't advance the index - retry with smaller batch
+                            continue
                         else:
-                            # If it's another error, re-raise it
+                            # Re-raise other errors
                             raise e
 
-                # Process and store predictions for each user in this batch
-                for idx, user_id in enumerate(batch_users_np):
-                    # Get scores for this user
-                    user_scores = all_scores[idx].cpu().numpy()
+                # Extract top-k items for each user in the batch
+                self._extract_top_k_items(user_batch, all_scores, k, predictions)
 
-                    # Find top-k items - faster with partial sort
-                    top_k_indices = np.argpartition(user_scores, -k)[-k:]
-                    top_k_indices = top_k_indices[np.argsort(-user_scores[top_k_indices])]
-
-                    # Store only top-k indices
-                    predictions[user_id] = top_k_indices.tolist()
-
-                # Clear batch data
+                # Clean up batch memory
                 del all_scores, users_tensor, timestamps_tensor
                 torch.cuda.empty_cache()
                 gc.collect()
 
-                # Report timing
-                elapsed = time() - start_time
-                remaining_users = num_users - end_idx
-                remaining_batches = remaining_users / batch_size if batch_size > 0 else 0
-                eta = remaining_batches * elapsed
-
-                print(f"Batch processed in {elapsed:.2f} seconds. ETA: {eta:.2f} seconds")
-
                 # Move to next user batch
                 i = end_idx
 
+        total_time = time() - start_time
+        print(f"Prediction completed in {total_time:.2f} seconds")
         return predictions
 
-    def save(self, path):
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'model_config': {
-                'num_users': len(self.unique_users),
-                'num_items': len(self.unique_items),
-                'factors': self.model.mf_user_embedding.weight.shape[1],
-                'layers': [layer.out_features for layer in self.model.mlp_layers],
-                'time_factors': self.time_factors,
-                'dropout': self.model.dropout
+    # Helper methods for batch_predict_for_users
+
+    def _convert_to_numpy(self, tensor_or_array):
+        """Convert tensor or array to numpy array"""
+        if isinstance(tensor_or_array, torch.Tensor):
+            return tensor_or_array.cpu().numpy()
+        else:
+            return np.array(tensor_or_array)
+
+    def _process_timestamps(self, timestamps):
+        """Process timestamps to numpy array if they exist"""
+        if not self.use_time or timestamps is None:
+            return None
+
+        if isinstance(timestamps, torch.Tensor):
+            return timestamps.cpu().numpy()
+        else:
+            return np.array(timestamps) if timestamps is not None else None
+
+    def _setup_items_tensor(self, items):
+        """Setup the items tensor"""
+        if items is None:
+            return torch.arange(len(self.unique_items), device=self.device)
+        elif not isinstance(items, torch.Tensor):
+            return torch.tensor(items, dtype=torch.long, device=self.device)
+        return items
+
+    def _get_user_batches(self, users_np, batch_size):
+        """Generate batches of users"""
+        for i in range(0, len(users_np), batch_size):
+            yield users_np[i:i + batch_size]
+
+    def _get_item_batches(self, items, batch_size):
+        """Generate batches of items"""
+        for i in range(0, len(items), batch_size):
+            yield items[i:i + batch_size]
+
+    def _prepare_user_batch_tensors(self, user_batch, timestamps_np):
+        """Prepare tensor representations for a user batch"""
+        users_tensor = torch.tensor(user_batch, dtype=torch.long, device=self.device)
+
+        timestamps_tensor = None
+        if self.use_time and timestamps_np is not None:
+            batch_indices = np.searchsorted(np.arange(len(timestamps_np)), user_batch)
+            valid_indices = batch_indices < len(timestamps_np)
+
+            if np.all(valid_indices):
+                batch_timestamps = timestamps_np[batch_indices]
+                timestamps_tensor = torch.tensor(batch_timestamps, dtype=torch.float32, device=self.device)
+
+        return users_tensor, timestamps_tensor
+
+    def _precompute_metadata(self, df_metadata, metadata_features, items):
+        """Precompute metadata features for faster access during prediction"""
+        if not self.use_metadata or df_metadata is None or metadata_features is None:
+            return None
+
+        start = time()
+        print("Precomputing metadata features...")
+
+        # Ensure df_metadata is indexed properly
+        if 'item_idx' in df_metadata.columns and df_metadata.index.name != 'item_idx':
+            df_metadata = df_metadata.set_index('item_idx')
+
+        # Initialize the metadata cache
+        metadata_cache = {}
+        items_np = items.cpu().numpy()
+
+        # Process each feature
+        for feature in metadata_features:
+            if feature not in df_metadata.columns:
+                print(f"Warning: Feature '{feature}' not found in metadata")
+                continue
+
+            # Sample the first non-null value to determine feature dimension
+            sample_value = None
+            for idx in df_metadata.index:
+                if idx in df_metadata.index:
+                    val = df_metadata.loc[idx, feature]
+                    if val is not None:
+                        sample_value = val
+                        break
+
+            if sample_value is None:
+                print(f"Warning: No valid values found for feature '{feature}'")
+                continue
+
+            # Determine feature dimension
+            feature_dim = len(sample_value) if isinstance(sample_value, (list, np.ndarray)) else 1
+            is_high_dim = feature_dim > 500  # Special handling for high-dimensional features
+
+            # Initialize feature cache
+            metadata_cache[feature] = {
+                'data': {},
+                'dim': feature_dim,
+                'is_high_dim': is_high_dim
             }
-        }, path)
-    
-    @classmethod
-    def load(cls, path, device=None):
-        if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
-        checkpoint = torch.load(path, map_location=device)
-        config = checkpoint['model_config']
-        
-        # Create model
-        recommender = cls(
-            unique_users=list(range(config['num_users'])),
-            unique_items=list(range(config['num_items'])),
-            factors=config['factors'],
-            layers=config['layers'],
-            time_factors=config['time_factors'],
-            dropout=config.get('dropout', 0.0),
-            device=device
-        )
-        
-        # Load weights
-        recommender.model.load_state_dict(checkpoint['model_state_dict'])
-        
-        return recommender
+
+            # Cache feature values for all items
+            for item_id in items_np:
+                if item_id in df_metadata.index:
+                    val = df_metadata.loc[item_id, feature]
+
+                    if val is not None:
+                        if is_high_dim and isinstance(val, list):
+                            # For high-dim features, store only non-zero indices to save memory
+                            non_zero_indices = [i for i, v in enumerate(val) if v != 0]
+                            metadata_cache[feature]['data'][item_id] = non_zero_indices
+                        else:
+                            metadata_cache[feature]['data'][item_id] = val
+                    else:
+                        # Handle missing values
+                        metadata_cache[feature]['data'][item_id] = (
+                            [0.0] * feature_dim if feature_dim > 1 else 0.0
+                        )
+                else:
+                    # Handle items not in metadata
+                    metadata_cache[feature]['data'][item_id] = (
+                        [0.0] * feature_dim if feature_dim > 1 else 0.0
+                    )
+
+        print(f"Metadata precomputation completed in {time() - start:.2f} seconds")
+        return metadata_cache
+
+    def _process_item_batch(self, users_tensor, item_batch, timestamps_tensor, metadata_cache, metadata_features):
+        """Process a batch of items for all users in the current batch"""
+        batch_size = users_tensor.size(0)  # Number of users
+        item_batch_size = len(item_batch)  # Number of items
+
+        # Create input matrices for the model
+        users_matrix = users_tensor.unsqueeze(1).expand(-1, item_batch_size).reshape(-1)
+        items_matrix = item_batch.unsqueeze(0).expand(batch_size, -1).reshape(-1)
+
+        # Process timestamps if available
+        timestamps_matrix = None
+        if self.use_time and timestamps_tensor is not None:
+            timestamps_matrix = timestamps_tensor.unsqueeze(1).expand(-1, item_batch_size).reshape(-1)
+
+        # Process metadata if available
+        metadata_matrices = None
+        if self.use_metadata and metadata_cache:
+            metadata_matrices = self._create_metadata_matrices(
+                item_batch, batch_size, metadata_cache, metadata_features
+            )
+
+        # Make predictions
+        batch_predictions = self.model(users_matrix, items_matrix, timestamps_matrix, metadata_matrices)
+
+        # Reshape predictions to batch_size x item_batch_size
+        return batch_predictions.view(batch_size, item_batch_size)
+
+    def _create_metadata_matrices(self, item_batch, batch_size, metadata_cache, metadata_features):
+        """Create metadata matrices for a batch of items"""
+        batch_items_np = item_batch.cpu().numpy()
+        metadata_matrices = []
+
+        for feature in metadata_features:
+            if feature not in metadata_cache:
+                continue
+
+            feature_info = metadata_cache[feature]
+            feature_data = feature_info['data']
+            feature_dim = feature_info['dim']
+            is_high_dim = feature_info['is_high_dim']
+
+            if is_high_dim:
+                # For high-dimensional sparse features
+                batch_tensor = torch.zeros(
+                    (len(batch_items_np), feature_dim),
+                    dtype=torch.float32,
+                    device=self.device
+                )
+
+                # Set the non-zero values
+                for i, item_id in enumerate(batch_items_np):
+                    if item_id in feature_data:
+                        indices = feature_data[item_id]
+                        if indices:  # If there are non-zero indices
+                            batch_tensor[i, indices] = 1.0
+            else:
+                # For regular features
+                if feature_dim > 1:
+                    # Multi-dimensional features
+                    values = [feature_data.get(item_id, [0.0] * feature_dim) for item_id in batch_items_np]
+                    batch_tensor = torch.tensor(values, dtype=torch.float32, device=self.device)
+                else:
+                    # Single-dimensional features
+                    values = [feature_data.get(item_id, 0.0) for item_id in batch_items_np]
+                    batch_tensor = torch.tensor(values, dtype=torch.float32, device=self.device).unsqueeze(1)
+
+            # Expand the tensor for all users
+            expanded_tensor = batch_tensor.unsqueeze(0).expand(batch_size, -1, -1)
+            expanded_tensor = expanded_tensor.reshape(-1, expanded_tensor.size(-1))
+            metadata_matrices.append(expanded_tensor)
+
+        return metadata_matrices
+
+    def _get_gpu_memory_usage(self):
+        """Get current GPU memory usage"""
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # GB
+            allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
+
+            # Estimate total GPU memory (adjust based on your GPU)
+            total_gpu_memory = 8.0  # RTX 4060 Mobile has around 8GB
+
+            gpu_memory_usage = reserved / total_gpu_memory
+            return reserved, allocated, gpu_memory_usage
+        return 0, 0, 0
+
+    def _adjust_batch_sizes(self, current_user_batch_size, current_item_batch_size,
+                            user_batch_size, item_batch_size, using_shared_memory):
+        """Adjust batch sizes based on current GPU memory usage"""
+        reserved, allocated, gpu_memory_usage = self._get_gpu_memory_usage()
+
+        # Print memory stats every few iterations
+        # print(f"GPU Memory: Reserved={reserved:.2f}GB ({gpu_memory_usage * 100:.1f}%), "
+        #       f"Allocated={allocated:.2f}GB")
+
+        # Adjust batch sizes based on memory usage
+        if gpu_memory_usage > 0.99 and not using_shared_memory:
+            # Memory usage is high, reduce batch sizes
+            using_shared_memory = True
+            current_user_batch_size = max(32, current_user_batch_size // 2)
+            current_item_batch_size = max(1024, current_item_batch_size // 2)
+
+            print(f"High memory usage detected! Reduced batch sizes: "
+                  f"users={current_user_batch_size}, items={current_item_batch_size}")
+
+            # Clear memory
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        elif gpu_memory_usage < 0.9 and using_shared_memory:
+            # Memory usage has decreased, increase batch sizes
+            using_shared_memory = False
+            current_user_batch_size = min(user_batch_size, current_user_batch_size * 2)
+            current_item_batch_size = min(item_batch_size, current_item_batch_size * 2)
+
+            print(f"Memory usage has decreased. Increased batch sizes: "
+                  f"users={current_user_batch_size}, items={current_item_batch_size}")
+
+        return current_user_batch_size, current_item_batch_size, using_shared_memory
+
+    def _handle_oom_error(self, current_item_batch_size):
+        """Handle out of memory error by reducing batch size"""
+        reduced_batch_size = max(128, current_item_batch_size // 4)
+        using_shared_memory = True
+
+        print(f"CUDA OOM error! Reduced item batch size to {reduced_batch_size}")
+
+        # Clear memory
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+
+        return reduced_batch_size, using_shared_memory
+
+    def _extract_top_k_items(self, user_batch, all_scores, k, predictions):
+        """Extract top-k items for each user from scores"""
+        user_scores = all_scores.cpu().numpy()
+
+        for i, user_id in enumerate(user_batch):
+            # Find top-k items efficiently
+            scores = user_scores[i]
+            top_k_indices = np.argpartition(scores, -k)[-k:]
+            top_k_indices = top_k_indices[np.argsort(-scores[top_k_indices])]
+
+            # Store results
+            predictions[user_id] = top_k_indices.tolist()
+
+    def _log_user_batch_progress(self, batch_idx, batch, total_users, batch_size):
+        """Log progress for user batch processing"""
+        batch_num = batch_idx + 1
+        total_batches = (total_users - 1) // batch_size + 1
+        print(f'Processing user batch {batch_num}/{total_batches} ({len(batch)} users)')
+
