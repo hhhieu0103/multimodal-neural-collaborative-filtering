@@ -603,8 +603,8 @@ class NCFRecommender:
         elif gpu_memory_usage < 0.9 and using_shared_memory:
             # Memory usage has decreased, increase batch sizes
             using_shared_memory = False
-            current_user_batch_size = min(user_batch_size, current_user_batch_size * 2)
-            current_item_batch_size = min(item_batch_size, current_item_batch_size * 2)
+            current_user_batch_size = min(user_batch_size, round(current_user_batch_size * 1.5))
+            current_item_batch_size = min(item_batch_size, round(current_item_batch_size * 1.5))
 
             print(f"Memory usage has decreased. Increased batch sizes: "
                   f"users={current_user_batch_size}, items={current_item_batch_size}")

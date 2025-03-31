@@ -10,6 +10,7 @@ from datetime import datetime
 from dataset import NCFDataset
 from recom_ncf import NCFRecommender
 from evaluation import Evaluation
+from helpers.index_manager import IndexManager
 
 class NCFTuner:
     def __init__(
@@ -17,11 +18,11 @@ class NCFTuner:
         train_data,
         val_data,
         test_data,
-        metadata,
         unique_users,
         unique_items,
-        time_features=['timestamp'],
-        metadata_features=[],
+        time_feature=None,
+        metadata=None,
+        metadata_features=None,
         k_values=[50, 20, 10],
         results_dir='tuning_results'
     ):
@@ -33,27 +34,39 @@ class NCFTuner:
         self.unique_items = unique_items
         self.results_dir = results_dir
         self.k_values = k_values
-        self.time_features = time_features
+        self.time_feature = time_feature
         self.metadata_features = metadata_features
         
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
+
+        self.use_time = time_feature is not None
+        self.use_metadata = metadata is not None and metadata_features is not None and len(metadata_features) > 0
         
         # Default parameter grid
         self.param_grid = {
             'factors': [8, 16, 32, 64],
             'mlp_user_item_dim': [32, 64, 128],
-            'mlp_time_dim': [4, 8, 16],
-            'mlp_metadata_embedding_dims': [[8, 8, 8], [16, 16, 16], [32, 32, 32]],
             'learning_rate': [0.0001, 0.001, 0.01],
             'epochs': [1],
             'optimizer': ['sgd', 'adam', 'adagrad'],
             'dropout': [0.0, 0.2, 0.5],
             'weight_decay': [0.0, 0.0001, 0.00001],
             'loss_fn': ['bce', 'mse', 'bpr'],
-            'time_features': self.time_features
+            'batch_size': [128, 256, 512],
         }
-        
+
+        if self.use_time:
+            self.param_grid['mlp_time_dim'] = [4, 8, 16]
+
+        if self.use_metadata:
+            self.param_grid['mlp_metadata_embedding_dims'] = [[8, 8, 8], [16, 16, 16], [32, 32, 32]]
+
+
+    def set_param_grid(self, param_grid):
+        """Set the parameter grid to use"""
+        self.param_grid = param_grid
+
     def update_param_grid(self, param_grid):
         """Update the parameter grid with custom values"""
         self.param_grid.update(param_grid)
@@ -61,59 +74,70 @@ class NCFTuner:
     def run_experiment(self, params):
         """Run a single experiment with the given parameters"""
         print(f"Running experiment with params: {params}")
+
+        recommender_params = {
+            'unique_users': self.unique_users,
+            'unique_items': self.unique_items,
+            'factors': params['factors'],
+            'mlp_user_item_dim': params['mlp_user_item_dim'],
+            'learning_rate': params['learning_rate'],
+            'epochs': params['epochs'],
+            'optimizer': params['optimizer']
+        }
+
+        if self.use_time:
+            recommender_params['mlp_time_dim'] = params['mlp_time_dim']
+
+        if self.use_metadata:
+            recommender_params['mlp_metadata_embedding_dims'] = params['mlp_metadata_embedding_dims']
         
         # Create model with the specified parameters
-        model = NCFRecommender(
-            unique_users=self.unique_users,
-            unique_items=self.unique_items,
-            factors=params['factors'],
-            mlp_user_item_dim=params['mlp_user_item_dim'],
-            mlp_time_dim=params['mlp_time_dim'],
-            mlp_metadata_embedding_dims=params['mlp_metadata_embedding_dims'],
-            learning_rate=params['learning_rate'],
-            epochs=params['epochs'],
-            optimizer=params['optimizer']
-        )
-        
+        model = NCFRecommender(**recommender_params)
+
+        dataset_params = {'df_interaction': self.train_data}
+
+        if self.use_time:
+            dataset_params['time_feature'] = self.time_feature
+
+        if self.use_metadata:
+            dataset_params['df_metadata'] = self.metadata
+            dataset_params['metadata_features'] = self.metadata_features
+
         # Create data loaders
-        train_dataset = NCFDataset(
-            df=self.train_data,
-            time_feature=params['time_features'],
-            df_metadata=self.metadata,
-            metadata_features=self.metadata_features
-        )
-        val_dataset = NCFDataset(
-            df=self.train_data,
-            time_feature=params['time_features'],
-            df_metadata=self.metadata,
-            metadata_features=self.metadata_features
-        )
+        train_dataset = NCFDataset(**dataset_params)
+        val_dataset = NCFDataset(**dataset_params)
+
+        dataloader_params = {
+            'batch_size': params['batch_size'],
+            'shuffle': True,
+            'num_workers': 4,
+            'persistent_workers': True,
+            'prefetch_factor': 2,
+            'pin_memory': True
+        }
         
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=16384, 
-            shuffle=True, num_workers=4, persistent_workers=True, prefetch_factor=2, pin_memory=True
-        )
-        
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=16384, 
-            shuffle=False, num_workers=4, persistent_workers=True, prefetch_factor=2, pin_memory=True
-        )
+        train_loader = DataLoader(train_dataset, **dataloader_params)
+        val_loader = DataLoader(val_dataset, **dataloader_params)
         
         # Train the model
         model.fit(train_loader, val_loader)
         
         # Evaluate the model at different k values
         eval_results = {}
-        evaluator = Evaluation(
-            recommender=model,
-            test_data=self.test_data,
-            df_metadata=self.metadata,
-            max_k=max(self.k_values),
-            time_feature=params['time_features'],
-            metadata_features=self.metadata_features
-        )
+        evaluator_params = {
+            'recommender': model,
+            'test_data': self.test_data,
+            'max_k': max(self.k_values),
+        }
+
+        if self.use_time:
+            evaluator_params['time_feature'] = self.time_feature
+
+        if self.use_metadata:
+            evaluator_params['df_metadata'] = self.metadata
+            evaluator_params['metadata_features'] = self.metadata_features
+
+        evaluator = Evaluation(**evaluator_params)
         for k in self.k_values:
             metrics = evaluator.evaluate(k)
             eval_results[f'k={k}'] = metrics
@@ -250,21 +274,27 @@ class NCFTuner:
             json.dump(serializable_results, f, indent=2)
             
         return filepath
-        
-    def analyze_results(self, results_file=None):
-        """Analyze tuning results and return best parameters"""
-        if results_file:
-            with open(results_file, 'r') as f:
+
+    def __load_results(self, filepath):
+        """Load results from a file"""
+        if filepath:
+            with open(filepath, 'r') as f:
                 results = json.load(f)
         else:
             # Find the most recent final results file
-            files = [f for f in os.listdir(self.results_dir) if f.startswith('final_results_')]
+            files = [f for f in os.listdir(self.results_dir) if f.startswith('random_search_final_') and f.endswith('.json')]
             if not files:
                 raise ValueError("No results file found")
-            
+
             latest_file = max(files)
             with open(os.path.join(self.results_dir, latest_file), 'r') as f:
                 results = json.load(f)
+
+        return results
+
+    def analyze_results(self, results_file=None):
+        """Analyze tuning results and return best parameters"""
+        results = self.__load_results(results_file)
         
         # Analyze for different metrics
         best_params = {}
@@ -293,18 +323,7 @@ class NCFTuner:
             print("matplotlib and seaborn are required for plotting")
             return
             
-        if results_file:
-            with open(results_file, 'r') as f:
-                results = json.load(f)
-        else:
-            # Find the most recent final results file
-            files = [f for f in os.listdir(self.results_dir) if f.startswith('final_results_')]
-            if not files:
-                raise ValueError("No results file found")
-            
-            latest_file = max(files)
-            with open(os.path.join(self.results_dir, latest_file), 'r') as f:
-                results = json.load(f)
+        results = self.__load_results(results_file)
                 
         # Convert results to DataFrame for easier analysis
         rows = []
@@ -320,9 +339,9 @@ class NCFTuner:
         # Plot heatmaps for parameters and metrics
         plt.figure(figsize=(15, 10))
         
-        for i, param in enumerate(['factors', 'time_features', 'mlp_metadata_embedding_dims', 'learning_rate']):
+        for i, param in enumerate(self.param_grid.keys()):
             for j, metric in enumerate(['Hit Ratio@10', 'NDCG@10', 'Recall@10']):
-                plt.subplot(5, 3, i*3 + j + 1)
+                plt.subplot(len(self.param_grid.keys()), 3, i*3 + j + 1)
                 pivot = df.pivot_table(
                     index=param,
                     values=metric,

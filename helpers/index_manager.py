@@ -185,7 +185,7 @@ class IndexManager:
         """Return a list of all item indices in consecutive order"""
         return list(range(len(self.item_id_to_idx)))
 
-    def predicted_id_to_idx(self, users, items=None, timestamps=None):
+    def predict_id_to_idx(self, users, items=None, timestamps=None):
         """
         Convert user and item IDs to indices for prediction.
 
@@ -224,33 +224,22 @@ class IndexManager:
 
         return user_indices, item_indices, timestamps
 
-    def convert_predictions_to_ids(self, user_indices, item_prediction_indices):
+    def convert_predictions_to_ids(self, predictions):
         """
         Convert prediction results from indices back to original IDs.
 
         Args:
-            user_indices: List or array of user indices
-            item_prediction_indices: Dictionary mapping user indices to lists of recommended item indices
+            predictions: Dictionary mapping user indices to lists of recommended item indices
 
         Returns:
             Dictionary mapping original user IDs to lists of recommended item IDs
         """
         result = {}
 
-        for user_idx in user_indices:
-            if user_idx in item_prediction_indices:
-                # Get the original user ID
-                user_id = self.user_idx_to_id.get(user_idx)
-
-                if user_id is not None:
-                    # Convert item indices to original IDs
-                    item_indices = item_prediction_indices[user_idx]
-                    item_ids = [self.item_idx_to_id.get(idx) for idx in item_indices]
-
-                    # Remove any None values (could happen if index is out of range)
-                    item_ids = [item_id for item_id in item_ids if item_id is not None]
-
-                    result[user_id] = item_ids
+        for user_idx, item_indices in predictions.items():
+            user_id = self.user_idx_to_id.get(user_idx)
+            item_ids = [self.item_idx_to_id.get(item_idx) for item_idx in item_indices]
+            result[user_id] = item_ids
 
         return result
 
