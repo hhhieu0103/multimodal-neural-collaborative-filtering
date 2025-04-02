@@ -577,8 +577,15 @@ class NCFRecommender:
             return reserved, allocated, gpu_memory_usage
         return 0, 0, 0
 
-    def _adjust_batch_sizes(self, current_user_batch_size, current_item_batch_size,
-                            user_batch_size, item_batch_size, using_shared_memory):
+    def _adjust_batch_sizes(
+            self,
+            current_user_batch_size,
+            current_item_batch_size,
+            default_user_batch_size,
+            default_item_batch_size,
+            using_shared_memory,
+            min_user_batch_size=32,
+            min_item_batch_size=1024):
         """Adjust batch sizes based on current GPU memory usage"""
         reserved, allocated, gpu_memory_usage = self._get_gpu_memory_usage()
 
@@ -590,8 +597,15 @@ class NCFRecommender:
         if gpu_memory_usage > 0.99 and not using_shared_memory:
             # Memory usage is high, reduce batch sizes
             using_shared_memory = True
-            current_user_batch_size = max(32, current_user_batch_size // 2)
-            current_item_batch_size = max(1024, current_item_batch_size // 2)
+
+            if current_item_batch_size > min_item_batch_size:
+                current_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
+            elif current_user_batch_size > min_user_batch_size:
+                current_item_batch_size = default_item_batch_size
+                current_user_batch_size = max(min_user_batch_size, current_user_batch_size // 2)
+            else:
+                current_item_batch_size = min_item_batch_size
+                current_user_batch_size = min_user_batch_size
 
             print(f"High memory usage detected! Reduced batch sizes: "
                   f"users={current_user_batch_size}, items={current_item_batch_size}")
@@ -603,8 +617,9 @@ class NCFRecommender:
         elif gpu_memory_usage < 0.9 and using_shared_memory:
             # Memory usage has decreased, increase batch sizes
             using_shared_memory = False
-            current_user_batch_size = min(user_batch_size, round(current_user_batch_size * 1.5))
-            current_item_batch_size = min(item_batch_size, round(current_item_batch_size * 1.5))
+
+            current_user_batch_size = round(current_user_batch_size * 1.5)
+            current_item_batch_size = round(current_item_batch_size * 1.5)
 
             print(f"Memory usage has decreased. Increased batch sizes: "
                   f"users={current_user_batch_size}, items={current_item_batch_size}")
