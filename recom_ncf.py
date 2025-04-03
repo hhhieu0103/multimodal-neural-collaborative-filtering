@@ -34,7 +34,6 @@ class NCFRecommender:
         weight_decay=0.0,
         loss_fn='bce',
         optimizer='sgd',
-        early_stopping_patience=5,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     ):
         
@@ -46,7 +45,8 @@ class NCFRecommender:
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.weight_decay = weight_decay
-        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_patience = min(3, round(epochs / 10))
+        self.mlp_metadata_embedding_dims = mlp_metadata_embedding_dims
         
         self.unique_users = torch.tensor(unique_users)
         self.unique_items = torch.tensor(unique_items)
@@ -135,7 +135,7 @@ class NCFRecommender:
         num_batches = 0
         
         for data_batch in train_data:
-            users, items, ratings, timestamps, metadata = self.__move_data_to_device(data_batch)
+            users, items, ratings, timestamps, metadata = self._move_data_to_device(data_batch)
 
             optimizer.zero_grad()
 
@@ -157,7 +157,7 @@ class NCFRecommender:
 
         with torch.no_grad():
             for data_batch in val_data:
-                users, items, ratings, timestamps, metadata = self.__move_data_to_device(data_batch)
+                users, items, ratings, timestamps, metadata = self._move_data_to_device(data_batch)
                 
                 predictions = self.model(users, items, timestamps, metadata)
                 loss = loss_fn(predictions, ratings)
@@ -167,7 +167,7 @@ class NCFRecommender:
                 
         return total_loss / num_batches
 
-    def __move_data_to_device(self, data_batch):
+    def _move_data_to_device(self, data_batch):
         users, items, ratings, timestamps, metadata = None, None, None, None, None
 
         if self.use_time and self.use_metadata:
@@ -276,7 +276,6 @@ class NCFRecommender:
         # Initialize batch sizes (will be adjusted dynamically)
         current_user_batch_size = user_batch_size
         current_item_batch_size = item_batch_size
-        using_shared_memory = False
 
         print(f"Processing predictions for {num_users} users and {num_items} items")
 
@@ -293,7 +292,7 @@ class NCFRecommender:
                 batch_size = len(user_batch)
 
                 # Log progress
-                self._log_user_batch_progress(i // user_batch_size, user_batch, num_users, user_batch_size)
+                print(f'Processing {i + 1} of {num_users} users... ({i / num_users:.2%})')
 
                 # Prepare user tensors
                 users_tensor = torch.tensor(user_batch, dtype=torch.long, device=self.device)
@@ -327,24 +326,13 @@ class NCFRecommender:
                         # Store scores in the all_scores tensor
                         all_scores[:, j:end_item_idx] = batch_scores
 
-                        # Adjust batch sizes based on memory usage (after each item batch)
-                        current_user_batch_size, current_item_batch_size, using_shared_memory = self._adjust_batch_sizes(
-                            current_user_batch_size,
-                            current_item_batch_size,
-                            user_batch_size,
-                            item_batch_size,
-                            using_shared_memory
-                        )
-
                         # Move to next item batch
                         j = end_item_idx
 
                     except RuntimeError as e:
                         # Handle OOM errors by reducing batch size and retrying
                         if "CUDA out of memory" in str(e):
-                            current_item_batch_size, using_shared_memory = self._handle_oom_error(
-                                current_item_batch_size
-                            )
+                            current_item_batch_size = self._handle_oom_error(current_item_batch_size)
                             # Don't advance the index - retry with smaller batch
                             continue
                         else:
@@ -353,6 +341,9 @@ class NCFRecommender:
 
                 # Extract top-k items for each user in the batch
                 self._extract_top_k_items(user_batch, all_scores, k, predictions)
+
+                # print('After item loop', self._get_gpu_memory_usage())
+                current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size, current_item_batch_size)
 
                 # Clean up batch memory
                 del all_scores, users_tensor, timestamps_tensor
@@ -568,68 +559,60 @@ class NCFRecommender:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # GB
-            allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
 
             # Estimate total GPU memory (adjust based on your GPU)
             total_gpu_memory = 8.0  # RTX 4060 Mobile has around 8GB
 
             gpu_memory_usage = reserved / total_gpu_memory
-            return reserved, allocated, gpu_memory_usage
-        return 0, 0, 0
+            return gpu_memory_usage
+        return 0
 
-    def _adjust_batch_sizes(
-            self,
-            current_user_batch_size,
-            current_item_batch_size,
-            default_user_batch_size,
-            default_item_batch_size,
-            using_shared_memory,
-            min_user_batch_size=32,
-            min_item_batch_size=1024):
-        """Adjust batch sizes based on current GPU memory usage"""
-        reserved, allocated, gpu_memory_usage = self._get_gpu_memory_usage()
+    def _adjust_batch_size(self, current_user_batch_size, current_item_batch_size, min_user_batch_size=64, min_item_batch_size=128):
+        """Adjust item batch size based on current GPU memory usage"""
+        gpu_memory_usage = self._get_gpu_memory_usage()
 
-        # Print memory stats every few iterations
-        # print(f"GPU Memory: Reserved={reserved:.2f}GB ({gpu_memory_usage * 100:.1f}%), "
-        #       f"Allocated={allocated:.2f}GB")
-
-        # Adjust batch sizes based on memory usage
-        if gpu_memory_usage > 0.99 and not using_shared_memory:
-            # Memory usage is high, reduce batch sizes
-            using_shared_memory = True
+        if gpu_memory_usage > 0.95:
 
             if current_item_batch_size > min_item_batch_size:
-                current_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
+                new_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
+                if new_item_batch_size != current_item_batch_size:
+                    print('Memory usage:', gpu_memory_usage ,'. Reduced item batch size from', current_item_batch_size, 'to', new_item_batch_size)
+                    current_item_batch_size = new_item_batch_size
             elif current_user_batch_size > min_user_batch_size:
-                current_item_batch_size = default_item_batch_size
-                current_user_batch_size = max(min_user_batch_size, current_user_batch_size // 2)
+                new_user_batch_size = max(min_user_batch_size, current_user_batch_size // 2)
+                if new_user_batch_size != current_user_batch_size:
+                    print('Memory usage:', gpu_memory_usage ,'. Reduced user batch size from', current_user_batch_size, 'to', new_user_batch_size)
+                    current_user_batch_size = new_user_batch_size
             else:
-                current_item_batch_size = min_item_batch_size
                 current_user_batch_size = min_user_batch_size
+                current_item_batch_size = min_item_batch_size
 
-            print(f"High memory usage detected! Reduced batch sizes: "
-                  f"users={current_user_batch_size}, items={current_item_batch_size}")
+        elif gpu_memory_usage < 0.8:
 
-            # Clear memory
-            torch.cuda.empty_cache()
-            gc.collect()
+            increasing_rate = 0.95 / gpu_memory_usage
 
-        elif gpu_memory_usage < 0.9 and using_shared_memory:
-            # Memory usage has decreased, increase batch sizes
-            using_shared_memory = False
+            if self.use_time:
+                increasing_rate = increasing_rate * 0.85
+            if self.use_metadata:
+                num_metadata_features = len(self.mlp_metadata_embedding_dims)
+                increasing_rate = increasing_rate * max(0.1, (0.95 - 0.1 * num_metadata_features))
 
-            current_user_batch_size = round(current_user_batch_size * 1.5)
-            current_item_batch_size = round(current_item_batch_size * 1.5)
+            new_user_batch_size = round(current_user_batch_size * increasing_rate)
+            new_item_batch_size = round(current_item_batch_size * increasing_rate)
 
-            print(f"Memory usage has decreased. Increased batch sizes: "
-                  f"users={current_user_batch_size}, items={current_item_batch_size}")
+            if new_user_batch_size != current_user_batch_size:
+                print('Memory usage:', gpu_memory_usage ,'. Increased user batch size from', current_user_batch_size, 'to', new_user_batch_size)
+                current_user_batch_size = new_user_batch_size
 
-        return current_user_batch_size, current_item_batch_size, using_shared_memory
+            if new_item_batch_size != current_item_batch_size:
+                print('Memory usage:', gpu_memory_usage ,'. Increased item batch size from', current_item_batch_size, 'to', new_item_batch_size)
+                current_item_batch_size = new_item_batch_size
+
+        return current_user_batch_size, current_item_batch_size
 
     def _handle_oom_error(self, current_item_batch_size):
         """Handle out of memory error by reducing batch size"""
         reduced_batch_size = max(128, current_item_batch_size // 4)
-        using_shared_memory = True
 
         print(f"CUDA OOM error! Reduced item batch size to {reduced_batch_size}")
 
@@ -638,7 +621,7 @@ class NCFRecommender:
         import gc
         gc.collect()
 
-        return reduced_batch_size, using_shared_memory
+        return reduced_batch_size
 
     def _extract_top_k_items(self, user_batch, all_scores, k, predictions):
         """Extract top-k items for each user from scores"""
@@ -652,10 +635,3 @@ class NCFRecommender:
 
             # Store results
             predictions[user_id] = top_k_indices.tolist()
-
-    def _log_user_batch_progress(self, batch_idx, batch, total_users, batch_size):
-        """Log progress for user batch processing"""
-        batch_num = batch_idx + 1
-        total_batches = (total_users - 1) // batch_size + 1
-        print(f'Processing user batch {batch_num}/{total_batches} ({len(batch)} users)')
-

@@ -14,7 +14,9 @@ class NCF(nn.Module):
         mlp_metadata_embedding_dims=None,
         num_mlp_layers=4,
         layers_ratio=2,
-        dropout=0
+        dropout=0,
+        gaussian_mean=0,
+        gaussian_std=0.01
     ):
         super(NCF, self).__init__()
         
@@ -50,6 +52,44 @@ class NCF(nn.Module):
             mlp_input_size = mlp_output_size
         
         self.prediction = nn.Linear(factors + mlp_output_size, 1)
+
+        # Initialize weights using Gaussian distribution
+        self._init_weights(gaussian_mean, gaussian_std)
+
+    def _init_weights(self, mean=0, std=0.01):
+        """
+        Initialize all weights using Gaussian distribution
+        Args:
+            mean: Mean of the Gaussian distribution
+            std: Standard deviation of the Gaussian distribution
+        """
+        # Initialize embedding layers
+        nn.init.normal_(self.mf_user_embedding.weight, mean=mean, std=std)
+        nn.init.normal_(self.mf_item_embedding.weight, mean=mean, std=std)
+        nn.init.normal_(self.mlp_user_embedding.weight, mean=mean, std=std)
+        nn.init.normal_(self.mlp_item_embedding.weight, mean=mean, std=std)
+
+        # Initialize time embedding layer if used
+        if self.use_time:
+            nn.init.normal_(self.time_embedding.weight, mean=mean, std=std)
+            nn.init.zeros_(self.time_embedding.bias)
+
+        # Initialize metadata projection layers if used
+        if self.use_metadata:
+            for layer in self.metadata_projection_layers:
+                nn.init.normal_(layer.weight, mean=mean, std=std)
+                nn.init.zeros_(layer.bias)
+
+        # Initialize MLP layers
+        for layer in self.mlp_layers:
+            nn.init.normal_(layer.weight, mean=mean, std=std)
+            nn.init.zeros_(layer.bias)
+
+        # Initialize prediction layer
+        nn.init.normal_(self.prediction.weight, mean=mean, std=std)
+        nn.init.zeros_(self.prediction.bias)
+
+        print(f"All weights initialized with Gaussian distribution (mean={mean}, std={std})")
 
     def forward(self, user, item, timestamp, metadata):
         mf_user_embed = self.mf_user_embedding(user)

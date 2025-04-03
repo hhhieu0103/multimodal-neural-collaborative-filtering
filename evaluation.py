@@ -205,7 +205,7 @@ class Evaluation:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def evaluate(self, k=10, user_batch_size=512, item_batch_size=2048):
+    def evaluate(self, k=10, user_batch_size=128, item_batch_size=1024):
         """
         Optimized evaluation method
         """
