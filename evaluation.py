@@ -263,7 +263,7 @@ class Evaluation:
 
             # Show progress periodically
             processed_users += 1
-            if processed_users % 100 == 0 or processed_users == total_users:
+            if processed_users % 10000 == 0 or processed_users == total_users:
                 print(f"Processed {processed_users}/{total_users} users...")
 
         # Calculate final metrics

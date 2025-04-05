@@ -155,7 +155,7 @@ class NCFDataset(Dataset):
                 for i, idx in enumerate(valid_indices):
                     val = values[i]
 
-                    if val is None or pd.isna(val):
+                    if val is None or (not isinstance(val, (list, np.ndarray)) and pd.isna(val)):
                         # Handle null values with zeros
                         continue
 

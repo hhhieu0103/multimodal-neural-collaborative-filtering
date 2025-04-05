@@ -10,7 +10,6 @@ from datetime import datetime
 from dataset import NCFDataset
 from recom_ncf import NCFRecommender
 from evaluation import Evaluation
-from helpers.index_manager import IndexManager
 
 class NCFTuner:
     def __init__(
@@ -75,6 +74,31 @@ class NCFTuner:
         """Run a single experiment with the given parameters"""
         print(f"Running experiment with params: {params}")
 
+        dataset_params = {}
+
+        if self.use_time:
+            dataset_params['time_feature'] = self.time_feature
+
+        if self.use_metadata:
+            dataset_params['df_metadata'] = self.metadata
+            dataset_params['metadata_features'] = self.metadata_features
+
+        # Create data loaders
+        train_dataset = NCFDataset(df_interaction=self.train_data, **dataset_params)
+        val_dataset = NCFDataset(df_interaction=self.test_data, **dataset_params)
+
+        dataloader_params = {
+            'batch_size': params['batch_size'],
+            'shuffle': True,
+            'num_workers': 4,
+            'persistent_workers': True,
+            'prefetch_factor': 2,
+            'pin_memory': True
+        }
+        
+        train_loader = DataLoader(train_dataset, **dataloader_params)
+        val_loader = DataLoader(val_dataset, **dataloader_params)
+
         recommender_params = {
             'unique_users': self.unique_users,
             'unique_items': self.unique_items,
@@ -90,34 +114,10 @@ class NCFTuner:
 
         if self.use_metadata:
             recommender_params['mlp_metadata_embedding_dims'] = params['mlp_metadata_embedding_dims']
-        
-        # Create model with the specified parameters
+            recommender_params['mlp_metadata_feature_dims'] = train_dataset.get_feature_dims()
+
+            # Create model with the specified parameters
         model = NCFRecommender(**recommender_params)
-
-        dataset_params = {'df_interaction': self.train_data}
-
-        if self.use_time:
-            dataset_params['time_feature'] = self.time_feature
-
-        if self.use_metadata:
-            dataset_params['df_metadata'] = self.metadata
-            dataset_params['metadata_features'] = self.metadata_features
-
-        # Create data loaders
-        train_dataset = NCFDataset(**dataset_params)
-        val_dataset = NCFDataset(**dataset_params)
-
-        dataloader_params = {
-            'batch_size': params['batch_size'],
-            'shuffle': True,
-            'num_workers': 4,
-            'persistent_workers': True,
-            'prefetch_factor': 2,
-            'pin_memory': True
-        }
-        
-        train_loader = DataLoader(train_dataset, **dataloader_params)
-        val_loader = DataLoader(val_dataset, **dataloader_params)
         
         # Train the model
         model.fit(train_loader, val_loader)

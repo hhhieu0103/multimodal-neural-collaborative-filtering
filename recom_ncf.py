@@ -45,7 +45,7 @@ class NCFRecommender:
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.weight_decay = weight_decay
-        self.early_stopping_patience = min(3, round(epochs / 10))
+        self.early_stopping_patience = 3
         self.mlp_metadata_embedding_dims = mlp_metadata_embedding_dims
         
         self.unique_users = torch.tensor(unique_users)
@@ -53,6 +53,12 @@ class NCFRecommender:
 
         self.use_time = mlp_time_dim is not None
         self.use_metadata = mlp_metadata_feature_dims is not None and mlp_metadata_embedding_dims is not None
+
+        self.total_emb_dims = (factors + mlp_user_item_dim) * 2
+        if self.use_time:
+            self.total_emb_dims += mlp_time_dim
+        if self.use_metadata:
+            self.total_emb_dims += sum(mlp_metadata_embedding_dims)
         
         self.model = NCF(
             num_users=len(unique_users),
@@ -332,7 +338,7 @@ class NCFRecommender:
                     except RuntimeError as e:
                         # Handle OOM errors by reducing batch size and retrying
                         if "CUDA out of memory" in str(e):
-                            current_item_batch_size = self._handle_oom_error(current_item_batch_size)
+                            current_user_batch_size, current_item_batch_size = self._handle_oom_error(current_item_batch_size)
                             # Don't advance the index - retry with smaller batch
                             continue
                         else:
@@ -571,7 +577,7 @@ class NCFRecommender:
         """Adjust item batch size based on current GPU memory usage"""
         gpu_memory_usage = self._get_gpu_memory_usage()
 
-        if gpu_memory_usage > 0.95:
+        if gpu_memory_usage >= 0.95:
 
             if current_item_batch_size > min_item_batch_size:
                 new_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
@@ -589,39 +595,39 @@ class NCFRecommender:
 
         elif gpu_memory_usage < 0.8:
 
-            increasing_rate = 0.95 / gpu_memory_usage
-
-            if self.use_time:
-                increasing_rate = increasing_rate * 0.85
-            if self.use_metadata:
-                num_metadata_features = len(self.mlp_metadata_embedding_dims)
-                increasing_rate = increasing_rate * max(0.1, (0.95 - 0.1 * num_metadata_features))
+            # increasing_rate = max(1.0, 0.95 / gpu_memory_usage / self.total_emb_dims * 256)
+            increasing_rate = 1.1
 
             new_user_batch_size = round(current_user_batch_size * increasing_rate)
             new_item_batch_size = round(current_item_batch_size * increasing_rate)
 
+            print('Memory usage:', gpu_memory_usage ,'. Increasing batch size with increasing rate of', increasing_rate)
+
             if new_user_batch_size != current_user_batch_size:
-                print('Memory usage:', gpu_memory_usage ,'. Increased user batch size from', current_user_batch_size, 'to', new_user_batch_size)
+                print('Increased user batch size from', current_user_batch_size, 'to', new_user_batch_size)
                 current_user_batch_size = new_user_batch_size
 
             if new_item_batch_size != current_item_batch_size:
-                print('Memory usage:', gpu_memory_usage ,'. Increased item batch size from', current_item_batch_size, 'to', new_item_batch_size)
+                print('Increased item batch size from', current_item_batch_size, 'to', new_item_batch_size)
                 current_item_batch_size = new_item_batch_size
 
         return current_user_batch_size, current_item_batch_size
 
-    def _handle_oom_error(self, current_item_batch_size):
+    def _handle_oom_error(self, current_user_batch_size, current_item_batch_size):
         """Handle out of memory error by reducing batch size"""
-        reduced_batch_size = max(128, current_item_batch_size // 4)
+        reduced_user_batch_size = max(128, current_user_batch_size // 4)
+        reduced_item_batch_size = max(128, current_item_batch_size // 4)
 
-        print(f"CUDA OOM error! Reduced item batch size to {reduced_batch_size}")
+        print(f"CUDA OOM error!")
+        print(f"Reduced user batch size to {reduced_user_batch_size}")
+        print(f"Reduced item batch size to {reduced_item_batch_size}")
 
         # Clear memory
         torch.cuda.empty_cache()
         import gc
         gc.collect()
 
-        return reduced_batch_size
+        return reduced_user_batch_size, reduced_item_batch_size
 
     def _extract_top_k_items(self, user_batch, all_scores, k, predictions):
         """Extract top-k items for each user from scores"""
