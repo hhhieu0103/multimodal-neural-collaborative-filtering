@@ -167,26 +167,26 @@ class NCFRecommender:
         return total_loss / num_batches
 
     def _move_data_to_device(self, data_batch):
-        users, items, ratings, additional_features = None, None, None, None
-
-        if self.mlp_additional_features is not None:
-            users, items, ratings, additional_features = data_batch
-        else:
-            users, items, ratings = data_batch
+        users, items, ratings = data_batch
 
         users = users.to(self.device)
         items = items.to(self.device)
         ratings = ratings.to(self.device)
 
-        if additional_features is not None:
-            for feature in self.mlp_additional_features.keys():
-                if self.mlp_additional_features[feature][0] == 1:
-                    additional_features[feature] = additional_features[feature].to(self.device)
+        additional_features = None
+        if self.mlp_additional_features is not None:
+            additional_features = {}
+            for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
+                if input_dim == 1:
+                    feature_values = self.feature_values[feature][items]
+                    additional_features[feature] = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
                 else:
-                    additional_features[feature] = [tensor.to(self.device) for tensor in additional_features[feature]]
+                    items_np = items.cpu().numpy()
+                    indices_list = self.feature_values[feature][items_np]
+                    additional_features[feature] = [torch.tensor(indices, dtype=torch.long, device=self.device) for indices in indices_list]
 
         return users, items, ratings, additional_features
-    
+
     def predict(self, users: np.ndarray, items: np.ndarray):
         self.model.eval()
 

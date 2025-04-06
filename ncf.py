@@ -87,7 +87,6 @@ class NCF(nn.Module):
                     pooled_embed = torch.mean(indices_embed, dim=0)
                     batch_embeds.append(pooled_embed)
                 feature_embed = torch.stack(batch_embeds)
-            # feature_embed = layer(additional_features[feature].unsqueeze(-1))
             mlp_vector = torch.cat([mlp_vector, feature_embed], dim=-1)
 
         for layer in self.mlp_layers:
