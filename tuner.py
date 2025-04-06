@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-import itertools
 import json
 import os
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 from dataset import NCFDataset
 from recom_ncf import NCFRecommender
@@ -19,28 +19,23 @@ class NCFTuner:
         test_data,
         unique_users,
         unique_items,
-        time_feature=None,
-        metadata=None,
-        metadata_features=None,
+        additional_features=None, # Dictionary where keys are feature names, values are lists of output dimensions
+        df_features=None,
         k_values=[50, 20, 10],
         results_dir='tuning_results'
     ):
         self.train_data = train_data
         self.val_data = val_data
         self.test_data = test_data
-        self.metadata = metadata
         self.unique_users = unique_users
         self.unique_items = unique_items
         self.results_dir = results_dir
         self.k_values = k_values
-        self.time_feature = time_feature
-        self.metadata_features = metadata_features
+        self.df_features = df_features
+        self.additional_features = additional_features
         
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
-
-        self.use_time = time_feature is not None
-        self.use_metadata = metadata is not None and metadata_features is not None and len(metadata_features) > 0
         
         # Default parameter grid
         self.param_grid = {
@@ -55,13 +50,6 @@ class NCFTuner:
             'batch_size': [128, 256, 512],
         }
 
-        if self.use_time:
-            self.param_grid['mlp_time_dim'] = [4, 8, 16]
-
-        if self.use_metadata:
-            self.param_grid['mlp_metadata_embedding_dims'] = [[8, 8, 8], [16, 16, 16], [32, 32, 32]]
-
-
     def set_param_grid(self, param_grid):
         """Set the parameter grid to use"""
         self.param_grid = param_grid
@@ -74,18 +62,9 @@ class NCFTuner:
         """Run a single experiment with the given parameters"""
         print(f"Running experiment with params: {params}")
 
-        dataset_params = {}
-
-        if self.use_time:
-            dataset_params['time_feature'] = self.time_feature
-
-        if self.use_metadata:
-            dataset_params['df_metadata'] = self.metadata
-            dataset_params['metadata_features'] = self.metadata_features
-
         # Create data loaders
-        train_dataset = NCFDataset(df_interaction=self.train_data, **dataset_params)
-        val_dataset = NCFDataset(df_interaction=self.test_data, **dataset_params)
+        train_dataset = NCFDataset(df_interaction=self.train_data, additional_features=params.get('mlp_additional_features', None))
+        val_dataset = NCFDataset(df_interaction=self.test_data, additional_features=params.get('mlp_additional_features', None))
 
         dataloader_params = {
             'batch_size': params['batch_size'],
@@ -106,21 +85,15 @@ class NCFTuner:
             'mlp_user_item_dim': params['mlp_user_item_dim'],
             'learning_rate': params['learning_rate'],
             'epochs': params['epochs'],
-            'optimizer': params['optimizer']
+            'optimizer': params['optimizer'],
+            'mlp_additional_features': params.get('mlp_additional_features', None),
         }
 
-        if self.use_time:
-            recommender_params['mlp_time_dim'] = params['mlp_time_dim']
-
-        if self.use_metadata:
-            recommender_params['mlp_metadata_embedding_dims'] = params['mlp_metadata_embedding_dims']
-            recommender_params['mlp_metadata_feature_dims'] = train_dataset.get_feature_dims()
-
-            # Create model with the specified parameters
+        # Create model with the specified parameters
         model = NCFRecommender(**recommender_params)
         
         # Train the model
-        model.fit(train_loader, val_loader)
+        model.fit(train_loader, val_loader, self.df_features)
         
         # Evaluate the model at different k values
         eval_results = {}
@@ -129,13 +102,6 @@ class NCFTuner:
             'test_data': self.test_data,
             'max_k': max(self.k_values),
         }
-
-        if self.use_time:
-            evaluator_params['time_feature'] = self.time_feature
-
-        if self.use_metadata:
-            evaluator_params['df_metadata'] = self.metadata
-            evaluator_params['metadata_features'] = self.metadata_features
 
         evaluator = Evaluation(**evaluator_params)
         for k in self.k_values:
@@ -149,48 +115,7 @@ class NCFTuner:
         eval_results['val_loss'] = model.val_losses
         
         return eval_results
-    
-    def perform_grid_search(self, num_combinations=None):
-        """
-        Perform grid search over parameter combinations
-        
-        Args:
-            num_combinations: If provided, randomly sample this many combinations
-                             instead of trying all combinations
-        """
-        # Generate all parameter combinations
-        keys = self.param_grid.keys()
-        combinations = list(itertools.product(*(self.param_grid[key] for key in keys)))
-        
-        # Sample a subset if specified
-        if num_combinations and num_combinations < len(combinations):
-            combinations = np.random.choice(combinations, num_combinations, replace=False)
-        
-        results = []
-        
-        # Run each combination
-        for combo_idx, combo_values in enumerate(combinations):
-            params = {key: value for key, value in zip(keys, combo_values)}
-            
-            # Run the experiment
-            experiment_results = self.run_experiment(params)
-            
-            # Save this experiment
-            result_entry = {
-                'params': params,
-                'metrics': experiment_results
-            }
-            results.append(result_entry)
-            
-            # Save intermediate results
-            self._save_results(results, f"intermediate_{combo_idx}")
-            
-        # Save final results
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._save_results(results, f"final_results_{timestamp}")
-        
-        return results
-    
+
     def perform_random_search(self, num_trials=10, prevent_duplicates=True):
         """
         Perform random search with the specified number of trials
@@ -216,7 +141,17 @@ class NCFTuner:
                     continue
                 
                 idx = np.random.randint(0, len(values))
-                params[key] = values[idx]  
+                params[key] = values[idx]
+
+            if self.additional_features is not None:
+                params['mlp_additional_features'] = {}
+                num_selected_features = np.random.randint(1, len(self.additional_features))
+                selected_features = np.random.choice(list(self.additional_features.keys()), num_selected_features, replace=False)
+
+                for feature in selected_features:
+                    output_dims = self.additional_features[feature]
+                    idx = np.random.randint(0, len(output_dims))
+                    params['mlp_additional_features'][feature] = output_dims[idx]
         
             params_hashable = tuple(
                 (k, tuple(v)) if isinstance(v, list) else (k, v)
@@ -275,7 +210,7 @@ class NCFTuner:
             
         return filepath
 
-    def __load_results(self, filepath):
+    def _load_results(self, filepath):
         """Load results from a file"""
         if filepath:
             with open(filepath, 'r') as f:
@@ -294,7 +229,7 @@ class NCFTuner:
 
     def analyze_results(self, results_file=None):
         """Analyze tuning results and return best parameters"""
-        results = self.__load_results(results_file)
+        results = self._load_results(results_file)
         
         # Analyze for different metrics
         best_params = {}
@@ -316,14 +251,7 @@ class NCFTuner:
         
     def plot_results(self, results_file=None):
         """Plot the results of hyperparameter tuning"""
-        try:
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-        except ImportError:
-            print("matplotlib and seaborn are required for plotting")
-            return
-            
-        results = self.__load_results(results_file)
+        results = self._load_results(results_file)
                 
         # Convert results to DataFrame for easier analysis
         rows = []
@@ -335,22 +263,6 @@ class NCFTuner:
             rows.append(row)
             
         df = pd.DataFrame(rows)
-        
-        # Plot heatmaps for parameters and metrics
-        plt.figure(figsize=(15, 10))
-        
-        for i, param in enumerate(self.param_grid.keys()):
-            for j, metric in enumerate(['Hit Ratio@10', 'NDCG@10', 'Recall@10']):
-                plt.subplot(len(self.param_grid.keys()), 3, i*3 + j + 1)
-                pivot = df.pivot_table(
-                    index=param,
-                    values=metric,
-                    aggfunc='mean'
-                )
-                sns.heatmap(pivot, annot=True, cmap='viridis')
-                plt.title(f"{metric} by {param}")
-                
-        plt.tight_layout()
         
         # Plot learning curves for best model
         best_idx = df['NDCG@10'].idxmax()
