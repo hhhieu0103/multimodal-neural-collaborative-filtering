@@ -6,6 +6,7 @@ from ncf import NCF
 import numpy as np
 import pandas as pd
 import gc
+import time
 
 class BPRLoss(nn.Module):
     def __init__(self):
@@ -32,6 +33,7 @@ class NCFRecommender:
         loss_fn='bce',
         optimizer='sgd',
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        # device=torch.device("cpu"),
     ):
         self.feature_values = None
         self.val_losses = None
@@ -84,8 +86,13 @@ class NCFRecommender:
             if df_features is None:
                 raise ValueError('The model is using additional features, but df_features is None')
             df_features = df_features.copy()
+            item_ids = df_features['item_id'].unique()
             df_features.set_index('item_id', inplace=True)
             self.feature_values = df_features.to_dict(orient='series')
+            for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
+                for item_id in item_ids:
+                    if input_dim != 1:
+                        self.feature_values[feature][item_id] = torch.tensor(self.feature_values[feature][item_id], dtype=torch.long, device=self.device)
 
         train_losses = []
         val_losses = []
@@ -169,6 +176,8 @@ class NCFRecommender:
     def _move_data_to_device(self, data_batch):
         users, items, ratings = data_batch
 
+        items_np = items.numpy()
+
         users = users.to(self.device)
         items = items.to(self.device)
         ratings = ratings.to(self.device)
@@ -178,12 +187,15 @@ class NCFRecommender:
             additional_features = {}
             for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
                 if input_dim == 1:
-                    feature_values = self.feature_values[feature][items]
+                    feature_values = self.feature_values[feature][items_np].values
                     additional_features[feature] = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
                 else:
-                    items_np = items.cpu().numpy()
-                    indices_list = self.feature_values[feature][items_np]
-                    additional_features[feature] = [torch.tensor(indices, dtype=torch.long, device=self.device) for indices in indices_list]
+                    feature_tensor = self.feature_values[feature][items_np].values
+                    indices = torch.cat(tuple(feature_tensor))
+                    lengths = torch.tensor([len(indices) for indices in feature_tensor], dtype=torch.long, device=self.device)
+                    offsets = torch.zeros(lengths.size(0), dtype=torch.long, device=self.device)
+                    torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
+                    additional_features[feature] = (indices, offsets)
 
         return users, items, ratings, additional_features
 
@@ -199,17 +211,23 @@ class NCFRecommender:
         users_tensor = users_tensor.unsqueeze(1).expand(-1, num_items).reshape(-1)
         items_tensor = items_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
 
+        start = time.time()
         additional_features = None
         if self.feature_values is not None:
             additional_features = {}
             for feature in self.feature_values.keys():
-                feature_values = self.feature_values[feature][items]
                 if self.mlp_additional_features[feature][0] == 1:
+                    feature_values = self.feature_values[feature][items].values
                     feature_tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
                     additional_features[feature] = feature_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
                 else:
-                    feature_tensors = [torch.tensor(values, dtype=torch.long, device=self.device) for values in feature_values] * num_users
-                    additional_features[feature] = feature_tensors
+                    feature_tensor = list(self.feature_values[feature][items].values) * num_users
+                    indices = torch.cat(tuple(feature_tensor))
+                    lengths = torch.tensor([len(indices) for indices in feature_tensor], dtype=torch.long, device=self.device)
+                    offsets = torch.zeros(lengths.size(0), dtype=torch.long, device=self.device)
+                    torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
+                    additional_features[feature] = (indices, offsets)
+        print('Time taken to create additional features:', time.time() - start, 'seconds')
 
         with torch.no_grad():
             predictions = self.model(users_tensor, items_tensor, additional_features)

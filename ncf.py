@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import time
 
 class NCF(nn.Module):
     def __init__(
@@ -32,7 +33,7 @@ class NCF(nn.Module):
                 if input_dim == 1:
                     self.projection_layers[feature] = nn.Linear(input_dim, output_dim)
                 else:
-                    self.projection_layers[feature] = nn.Embedding(input_dim, output_dim)
+                    self.projection_layers[feature] = nn.EmbeddingBag(input_dim, output_dim, mode='mean')
                 mlp_input_size += output_dim
 
         # MLP layers
@@ -81,12 +82,8 @@ class NCF(nn.Module):
             if isinstance(layer, nn.Linear):
                 feature_embed = layer(additional_features[feature].unsqueeze(-1))
             else:
-                batch_embeds = []
-                for indices_tensor in additional_features[feature]:
-                    indices_embed = layer(indices_tensor)
-                    pooled_embed = torch.mean(indices_embed, dim=0)
-                    batch_embeds.append(pooled_embed)
-                feature_embed = torch.stack(batch_embeds)
+                indices, offsets = additional_features[feature]
+                feature_embed = layer(indices, offsets)
             mlp_vector = torch.cat([mlp_vector, feature_embed], dim=-1)
 
         for layer in self.mlp_layers:
