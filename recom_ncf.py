@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import gc
 import time
+import math
 
 class BPRLoss(nn.Module):
     def __init__(self):
@@ -192,7 +193,7 @@ class NCFRecommender:
 
         return users, items, ratings, features
 
-    def predict(self, users: np.ndarray, items: np.ndarray):
+    def predict(self, users: np.ndarray, items: np.ndarray, feature_tensors: dict | None = None):
         self.model.eval()
 
         num_users = len(users)
@@ -204,25 +205,12 @@ class NCFRecommender:
         users_tensor = users_tensor.unsqueeze(1).expand(-1, num_items).reshape(-1)
         items_tensor = items_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
 
-        additional_features = None
-        if self.feature_values is not None:
-            additional_features = {}
-            for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
-                if input_dim == 1:
-                    feature_values = self.feature_values[feature][items].values
-                    feature_tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
-                    additional_features[feature] = feature_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
-                else:
-                    feature_tensor = list(self.feature_values[feature][items].values) * num_users
-                    indices = torch.cat(tuple(feature_tensor))
-                    lengths = torch.tensor([len(indices) for indices in feature_tensor], dtype=torch.long, device=self.device)
-                    offsets = torch.zeros(lengths.size(0), dtype=torch.long, device=self.device)
-                    torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
-                    additional_features[feature] = (indices, offsets)
+        if self.feature_values is not None and feature_tensors is None:
+            feature_tensors = self._get_batch_feature_tensors(items, num_users)
 
         with torch.no_grad():
-            predictions = self.model(users_tensor, items_tensor, additional_features)
-            
+            predictions = self.model(users_tensor, items_tensor, feature_tensors)
+
         return predictions.view(num_users, num_items)
 
     def batch_predict_for_users(
@@ -261,6 +249,10 @@ class NCFRecommender:
         current_user_batch_size = user_batch_size
         current_item_batch_size = item_batch_size
 
+        prev_item_batch_size = None
+        feature_tensors_cache = None
+        item_batch_idx = 0
+
         print(f"Processing predictions for {num_users} users and {num_items} items")
 
         with torch.no_grad():
@@ -277,6 +269,9 @@ class NCFRecommender:
                 # Initialize tensor to store all scores for this batch
                 all_scores = torch.zeros((actual_user_batch_size, num_items), device=self.device)
 
+                if feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
+                    feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size, actual_user_batch_size)
+
                 # Process items in batches for the current user batch
                 j = 0
                 start = time.time()
@@ -286,7 +281,11 @@ class NCFRecommender:
                         end_item_idx = min(j + current_item_batch_size, num_items)
                         item_batch = items[j:end_item_idx]
 
-                        batch_scores = self.predict(user_batch, item_batch)
+                        if feature_tensors_cache is not None and actual_user_batch_size == current_user_batch_size:
+                            batch_scores = self.predict(user_batch, item_batch, feature_tensors_cache[item_batch_idx])
+                            item_batch_idx += 1
+                        else:
+                            batch_scores = self.predict(user_batch, item_batch)
 
                         # Store scores in the all_scores tensor
                         all_scores[:, j:end_item_idx] = batch_scores
@@ -308,7 +307,10 @@ class NCFRecommender:
                 # Extract top-k items for each user in the batch
                 self._extract_top_k_items(user_batch, all_scores, k, predictions)
 
-                current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size, current_item_batch_size)
+                item_batch_idx = 0
+                if prev_item_batch_size != current_item_batch_size:
+                    prev_item_batch_size = current_item_batch_size
+                    current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size, current_item_batch_size)
 
                 # Clean up batch memory
                 del all_scores
@@ -321,6 +323,57 @@ class NCFRecommender:
         return predictions
 
     # Helper methods for batch_predict_for_users
+
+    def _build_feature_tensors_cache(self, items, item_batch_size, num_users):
+        num_batches = math.ceil(len(items) / item_batch_size)
+        feature_tensors_cache = {}
+        for batch_idx in range(num_batches):
+            batch_items = items[batch_idx * item_batch_size: (batch_idx + 1) * item_batch_size]
+            feature_tensors_cache[batch_idx] = self._get_batch_feature_tensors(batch_items, num_users)
+        return feature_tensors_cache
+
+    def _get_batch_feature_tensors(self, items, num_users):
+        feature_tensors = {}
+
+        # Process each feature type
+        for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
+            if input_dim == 1:
+                # For numeric features - more efficient handling
+                feature_values = np.array([self.feature_values[feature][item] for item in items])
+                tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
+                feature_tensors[feature] = tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
+            else:
+                all_indices = []
+                all_offsets = [0]
+
+                for item in items:
+                    indices = self.feature_values[feature][item]
+                    # TODO: modified collate function to return indices list instead of indices tensor
+                    if isinstance(indices, torch.Tensor):
+                        indices = indices.cpu().tolist()
+                    all_indices.extend(indices)
+                    all_offsets.append(all_offsets[-1] + len(indices))
+
+                # Remove the last offset (we only need num_items offsets)
+                all_offsets.pop()
+
+                # Convert to tensors
+                indices_tensor = torch.tensor(all_indices, dtype=torch.long, device=self.device)
+
+                # Now repeat for each user
+                repeated_indices = indices_tensor.repeat(num_users)
+
+                # For offsets, we need to add the proper offset for each user
+                user_offsets = []
+                last_offset = len(all_indices)  # Total number of indices for one user's items
+
+                for u in range(num_users):
+                    user_offsets.extend([offset + u * last_offset for offset in all_offsets])
+
+                offsets_tensor = torch.tensor(user_offsets, dtype=torch.long, device=self.device)
+
+                feature_tensors[feature] = (repeated_indices, offsets_tensor)
+        return feature_tensors
 
     def _get_gpu_memory_usage(self):
         """Get current GPU memory usage"""
@@ -338,8 +391,9 @@ class NCFRecommender:
     def _adjust_batch_size(self, current_user_batch_size, current_item_batch_size, min_user_batch_size=64, min_item_batch_size=128):
         """Adjust item batch size based on current GPU memory usage"""
         gpu_memory_usage = self._get_gpu_memory_usage()
+        is_stable = False
 
-        if gpu_memory_usage >= 0.95:
+        if gpu_memory_usage >= 0.9:
 
             if current_item_batch_size > min_item_batch_size:
                 new_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
@@ -355,7 +409,7 @@ class NCFRecommender:
                 current_user_batch_size = min_user_batch_size
                 current_item_batch_size = min_item_batch_size
 
-        elif gpu_memory_usage < 0.8:
+        elif gpu_memory_usage < 0.75:
 
             # increasing_rate = max(1.0, 0.95 / gpu_memory_usage / self.total_emb_dims * 256)
             increasing_rate = 1.1
