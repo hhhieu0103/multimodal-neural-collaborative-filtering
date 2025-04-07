@@ -174,30 +174,23 @@ class NCFRecommender:
         return total_loss / num_batches
 
     def _move_data_to_device(self, data_batch):
-        users, items, ratings = data_batch
-
-        items_np = items.numpy()
+        users, items, ratings, features = data_batch
 
         users = users.to(self.device)
         items = items.to(self.device)
         ratings = ratings.to(self.device)
 
-        additional_features = None
         if self.mlp_additional_features is not None:
-            additional_features = {}
             for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
                 if input_dim == 1:
-                    feature_values = self.feature_values[feature][items_np].values
-                    additional_features[feature] = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
+                    features[feature] = features[feature].to(self.device)
                 else:
-                    feature_tensor = self.feature_values[feature][items_np].values
-                    indices = torch.cat(tuple(feature_tensor))
-                    lengths = torch.tensor([len(indices) for indices in feature_tensor], dtype=torch.long, device=self.device)
-                    offsets = torch.zeros(lengths.size(0), dtype=torch.long, device=self.device)
-                    torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
-                    additional_features[feature] = (indices, offsets)
+                    indices, offsets = features[feature]
+                    indices = indices.to(self.device)
+                    offsets = offsets.to(self.device)
+                    features[feature] = (indices, offsets)
 
-        return users, items, ratings, additional_features
+        return users, items, ratings, features
 
     def predict(self, users: np.ndarray, items: np.ndarray):
         self.model.eval()
@@ -211,12 +204,11 @@ class NCFRecommender:
         users_tensor = users_tensor.unsqueeze(1).expand(-1, num_items).reshape(-1)
         items_tensor = items_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
 
-        start = time.time()
         additional_features = None
         if self.feature_values is not None:
             additional_features = {}
-            for feature in self.feature_values.keys():
-                if self.mlp_additional_features[feature][0] == 1:
+            for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
+                if input_dim == 1:
                     feature_values = self.feature_values[feature][items].values
                     feature_tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
                     additional_features[feature] = feature_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
@@ -227,7 +219,6 @@ class NCFRecommender:
                     offsets = torch.zeros(lengths.size(0), dtype=torch.long, device=self.device)
                     torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
                     additional_features[feature] = (indices, offsets)
-        print('Time taken to create additional features:', time.time() - start, 'seconds')
 
         with torch.no_grad():
             predictions = self.model(users_tensor, items_tensor, additional_features)
@@ -288,6 +279,7 @@ class NCFRecommender:
 
                 # Process items in batches for the current user batch
                 j = 0
+                start = time.time()
                 while j < num_items:
                     try:
                         # Get the current item batch
@@ -312,6 +304,7 @@ class NCFRecommender:
                             # Re-raise other errors
                             raise e
 
+                print('Time taken to create additional features:', time.time() - start, 'seconds')
                 # Extract top-k items for each user in the batch
                 self._extract_top_k_items(user_batch, all_scores, k, predictions)
 

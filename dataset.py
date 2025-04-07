@@ -2,7 +2,6 @@ import torch
 import pandas as pd
 from torch.utils.data import Dataset
 
-
 class NCFDataset(Dataset):
     def __init__(
             self,
@@ -10,6 +9,8 @@ class NCFDataset(Dataset):
             user_col: str = 'user_id',
             item_col: str = 'item_id',
             rating_col: str = 'rating_imp',
+            feature_dims = None, # Dictionary, key: feature, value: (input, output)
+            df_features = None
     ):
         """
         Dataset for NCF model with support for time features and metadata.
@@ -21,10 +22,12 @@ class NCFDataset(Dataset):
         items = df_interaction[item_col].values
         ratings = df_interaction[rating_col].values
 
-        # Ensure indices are properly cast as integers
         self.users = torch.tensor(users, dtype=torch.long)
         self.items = torch.tensor(items, dtype=torch.long)
         self.ratings = torch.tensor(ratings, dtype=torch.float32)
+
+        self.feature_dims = feature_dims
+        self.df_features = df_features.copy().set_index('item_id')
 
     def __len__(self):
         """Get the number of interactions in the dataset"""
@@ -32,5 +35,16 @@ class NCFDataset(Dataset):
 
     def __getitem__(self, idx):
         """Get a single interaction with its features"""
+        features_idx = None
+        if self.df_features is not None and self.feature_dims is not None:
+            features_idx = {}
+            item_id = self.items[idx].item()
+            for feature, (input_dim, output_dim) in self.feature_dims.items():
+                feature_value = self.df_features.loc[item_id][feature]
 
-        return self.users[idx], self.items[idx], self.ratings[idx]
+                if input_dim == 1:
+                    features_idx[feature] = torch.tensor(feature_value, dtype=torch.float32)
+                else:
+                    features_idx[feature] = torch.tensor(feature_value, dtype=torch.long)
+
+        return self.users[idx], self.items[idx], self.ratings[idx], features_idx
