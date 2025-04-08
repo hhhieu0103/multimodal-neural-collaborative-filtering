@@ -25,6 +25,7 @@ class NCFRecommender:
         factors=8,
         mlp_user_item_dim=32,
         mlp_additional_features=None, # Dictionary where keys are features, values are tuples (input, output)
+        df_features: pd.DataFrame=None,
         num_mlp_layers=4,
         layers_ratio=2,
         learning_rate=0.001,
@@ -47,6 +48,13 @@ class NCFRecommender:
         self.weight_decay = weight_decay
         self.early_stopping_patience = 3
         self.mlp_additional_features = mlp_additional_features
+
+        if self.mlp_additional_features is not None:
+            if df_features is None:
+                raise ValueError('The model is using additional features, but df_features is None')
+            df_features = df_features.copy()
+            df_features.set_index('item_id', inplace=True)
+            self.feature_values = df_features.to_dict(orient='series')
         
         self.unique_users = torch.tensor(unique_users)
         self.unique_items = torch.tensor(unique_items)
@@ -82,14 +90,7 @@ class NCFRecommender:
         else:
             raise ValueError(f'Unsupported optimizer: {self.optimizer}')
     
-    def fit(self, train_data: DataLoader, val_data: DataLoader, df_features: pd.DataFrame = None):
-        if self.mlp_additional_features is not None:
-            if df_features is None:
-                raise ValueError('The model is using additional features, but df_features is None')
-            df_features = df_features.copy()
-            df_features.set_index('item_id', inplace=True)
-            self.feature_values = df_features.to_dict(orient='series')
-
+    def fit(self, train_data: DataLoader, val_data: DataLoader):
         train_losses = []
         val_losses = []
         
