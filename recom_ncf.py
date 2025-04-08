@@ -24,7 +24,7 @@ class NCFRecommender:
         unique_items,
         factors=8,
         mlp_user_item_dim=32,
-        mlp_additional_features=None, # Dictionary where keys are features, values are tuples (input, output)
+        mlp_feature_dims=None, # Dictionary where keys are features, values are tuples (input, output)
         df_features: pd.DataFrame=None,
         num_mlp_layers=4,
         layers_ratio=2,
@@ -47,9 +47,9 @@ class NCFRecommender:
         self.optimizer = optimizer
         self.weight_decay = weight_decay
         self.early_stopping_patience = 3
-        self.mlp_additional_features = mlp_additional_features
+        self.mlp_feature_dims = mlp_feature_dims
 
-        if self.mlp_additional_features is not None:
+        if self.mlp_feature_dims is not None:
             if df_features is None:
                 raise ValueError('The model is using additional features, but df_features is None')
             else:
@@ -65,7 +65,7 @@ class NCFRecommender:
             num_items=len(unique_items),
             factors=factors,
             mlp_user_item_dim=mlp_user_item_dim,
-            mlp_additional_features=mlp_additional_features,
+            mlp_feature_dims=mlp_feature_dims,
             num_mlp_layers=num_mlp_layers,
             layers_ratio=layers_ratio,
             dropout=dropout
@@ -139,11 +139,11 @@ class NCFRecommender:
         num_batches = 0
         
         for data_batch in train_data:
-            users, items, ratings, additional_features = self._move_data_to_device(data_batch)
+            users, items, ratings, features = self._move_data_to_device(data_batch)
 
             optimizer.zero_grad()
 
-            predictions = self.model(users, items, additional_features)
+            predictions = self.model(users, items, features)
             loss = loss_fn(predictions, ratings)
 
             loss.backward()
@@ -161,9 +161,9 @@ class NCFRecommender:
 
         with torch.no_grad():
             for data_batch in val_data:
-                users, items, ratings, additional_features = self._move_data_to_device(data_batch)
+                users, items, ratings, features = self._move_data_to_device(data_batch)
                 
-                predictions = self.model(users, items, additional_features)
+                predictions = self.model(users, items, features)
                 loss = loss_fn(predictions, ratings)
                 
                 total_loss += loss.item()
@@ -178,8 +178,8 @@ class NCFRecommender:
         items = items.to(self.device)
         ratings = ratings.to(self.device)
 
-        if self.mlp_additional_features is not None:
-            for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
+        if self.mlp_feature_dims is not None:
+            for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
                 if input_dim == 1:
                     features[feature] = features[feature].to(self.device)
                 else:
@@ -266,7 +266,7 @@ class NCFRecommender:
                 # Initialize tensor to store all scores for this batch
                 all_scores = torch.zeros((actual_user_batch_size, num_items), device=self.device)
 
-                if self.mlp_additional_features is not None and feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
+                if self.mlp_feature_dims is not None and feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
                     feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size, actual_user_batch_size)
 
                 # Process items in batches for the current user batch
@@ -333,7 +333,7 @@ class NCFRecommender:
         feature_tensors = {}
 
         # Process each feature type
-        for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
+        for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
             if input_dim == 1:
                 # For numeric features - more efficient handling
                 feature_values = np.array(self.feature_values[feature][items])
