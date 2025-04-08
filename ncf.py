@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models
 
 class MLP(nn.Module):
     def __init__(
@@ -9,6 +10,7 @@ class MLP(nn.Module):
             num_items,
             embedding_dim=32,
             feature_dims=None,
+            image_dim=None,
             dropout=0.0,
             layers_ratio=2,
             num_layers=4,
@@ -29,6 +31,12 @@ class MLP(nn.Module):
                 else:
                     self.projection_layers[feature] = nn.EmbeddingBag(input_dim, output_dim, mode='mean')
                 mlp_input_dim += output_dim
+
+        if image_dim is not None:
+            self.image_layer = ImageModule(output_dim=image_dim)
+            mlp_input_dim += image_dim
+        else:
+            self.image_layer = None
 
         self.dropout = dropout
         self.layers = nn.ModuleList()
@@ -55,7 +63,7 @@ class MLP(nn.Module):
         #         if isinstance(layer, nn.Embedding):
         #             nn.init.normal_(layer.weight, mean=mean, std=std)
 
-    def forward(self, user, item, features):
+    def forward(self, user, item, features, image):
         user_embed = self.user_embedding(user)
         item_embed = self.item_embedding(item)
         vector = torch.cat([user_embed, item_embed], dim=-1)
@@ -67,6 +75,10 @@ class MLP(nn.Module):
                 indices, offsets = features[feature]
                 feature_embed = layer(indices, offsets)
             vector = torch.cat([vector, feature_embed], dim=-1)
+
+        if self.image_layer is not None:
+            image_embed = self.image_layer(image)
+            vector = torch.cat([vector, image_embed], dim=-1)
 
         for layer in self.layers:
             vector = F.relu(layer(vector))
@@ -107,6 +119,27 @@ class GMF(nn.Module):
         vector = torch.mul(user_embed, item_embed)
         return vector
 
+class ImageModule(nn.Module):
+    def __init__(self, output_dim=128, freeze_layers=True):
+        super(ImageModule, self).__init__()
+        # Load pretrained ResNet
+        self.model = models.resnet34()
+
+        # Freeze ResNet layers if specified
+        if freeze_layers:
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+        # Replace final fully connected layer
+        in_features = self.model.fc.in_features
+        self.model.fc = nn.Sequential(
+            nn.Linear(in_features, output_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
 class NCF(nn.Module):
     def __init__(
         self,
@@ -114,7 +147,8 @@ class NCF(nn.Module):
         num_items,
         factors=8,
         mlp_user_item_dim=32,
-        mlp_feature_dims=None, # Dictionary with keys are features, values are tuples of (input, output)
+        mlp_feature_dims=None, # Dictionary with keys are features, values are tuples of (input, output),
+        image_dim=None,
         num_mlp_layers=4,
         layers_ratio=2,
         dropout=0,
@@ -130,6 +164,7 @@ class NCF(nn.Module):
             num_items=num_items,
             embedding_dim=mlp_user_item_dim,
             feature_dims=mlp_feature_dims,
+            image_dim=image_dim,
             dropout=dropout,
             layers_ratio=layers_ratio,
             num_layers=num_mlp_layers,
@@ -140,9 +175,9 @@ class NCF(nn.Module):
 
         self.prediction = nn.Linear(factors + mlp_output_dim, 1)
 
-    def forward(self, user, item, features):
+    def forward(self, user, item, features, images):
         gmf_vector = self.gmf_module(user, item)
-        mlp_vector = self.mlp_module(user, item, features)
+        mlp_vector = self.mlp_module(user, item, features, images)
 
         vector = torch.cat([gmf_vector, mlp_vector], dim=-1)
         logit = self.prediction(vector)
