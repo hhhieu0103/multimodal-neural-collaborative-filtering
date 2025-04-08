@@ -87,13 +87,8 @@ class NCFRecommender:
             if df_features is None:
                 raise ValueError('The model is using additional features, but df_features is None')
             df_features = df_features.copy()
-            item_ids = df_features['item_id'].unique()
             df_features.set_index('item_id', inplace=True)
             self.feature_values = df_features.to_dict(orient='series')
-            for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
-                for item_id in item_ids:
-                    if input_dim != 1:
-                        self.feature_values[feature][item_id] = torch.tensor(self.feature_values[feature][item_id], dtype=torch.long, device=self.device)
 
         train_losses = []
         val_losses = []
@@ -339,7 +334,7 @@ class NCFRecommender:
         for feature, (input_dim, output_dim) in self.mlp_additional_features.items():
             if input_dim == 1:
                 # For numeric features - more efficient handling
-                feature_values = np.array([self.feature_values[feature][item] for item in items])
+                feature_values = np.array(self.feature_values[feature][items])
                 tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
                 feature_tensors[feature] = tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
             else:
@@ -348,9 +343,6 @@ class NCFRecommender:
 
                 for item in items:
                     indices = self.feature_values[feature][item]
-                    # TODO: modified collate function to return indices list instead of indices tensor
-                    if isinstance(indices, torch.Tensor):
-                        indices = indices.cpu().tolist()
                     all_indices.extend(indices)
                     all_offsets.append(all_offsets[-1] + len(indices))
 
