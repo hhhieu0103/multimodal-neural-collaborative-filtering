@@ -5,6 +5,7 @@ def collate_fn(batch):
     items = [x[1] for x in batch]
     ratings = [x[2] for x in batch]
     feature_dicts = [x[3] for x in batch]
+    images = [x[4] for x in batch]
 
     users = torch.stack(users)
     items = torch.stack(items)
@@ -26,4 +27,10 @@ def collate_fn(batch):
                 torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
                 features[name] = (indices, offsets)
 
-    return users, items, ratings, features
+    sample_image = images[0]
+    if sample_image is not None:
+        images = torch.stack(images)
+    else:
+        images = None
+
+    return users, items, ratings, features, images

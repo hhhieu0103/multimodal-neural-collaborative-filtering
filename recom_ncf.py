@@ -8,6 +8,7 @@ import pandas as pd
 import gc
 import time
 import math
+from helpers.h5_dataloader import H5DataLoader
 
 class BPRLoss(nn.Module):
     def __init__(self):
@@ -25,6 +26,8 @@ class NCFRecommender:
         factors=8,
         mlp_user_item_dim=32,
         mlp_feature_dims=None, # Dictionary where keys are features, values are tuples (input, output)
+        image_dim=None,
+        image_dataloader: H5DataLoader=None,
         df_features: pd.DataFrame=None,
         num_mlp_layers=4,
         layers_ratio=2,
@@ -48,6 +51,8 @@ class NCFRecommender:
         self.weight_decay = weight_decay
         self.early_stopping_patience = 3
         self.mlp_feature_dims = mlp_feature_dims
+        self.image_dim = image_dim
+        self.image_dataloader = image_dataloader
 
         if self.mlp_feature_dims is not None:
             if df_features is None:
@@ -56,7 +61,7 @@ class NCFRecommender:
                 df_features = df_features.copy()
                 df_features.set_index('item_id', inplace=True)
                 self.feature_values = df_features.to_dict(orient='series')
-        
+
         self.unique_users = torch.tensor(unique_users)
         self.unique_items = torch.tensor(unique_items)
 
@@ -139,11 +144,11 @@ class NCFRecommender:
         num_batches = 0
         
         for data_batch in train_data:
-            users, items, ratings, features = self._move_data_to_device(data_batch)
+            users, items, ratings, features, images = self._move_data_to_device(data_batch)
 
             optimizer.zero_grad()
 
-            predictions = self.model(users, items, features)
+            predictions = self.model(users, items, features, images)
             loss = loss_fn(predictions, ratings)
 
             loss.backward()
@@ -161,9 +166,9 @@ class NCFRecommender:
 
         with torch.no_grad():
             for data_batch in val_data:
-                users, items, ratings, features = self._move_data_to_device(data_batch)
+                users, items, ratings, features, images = self._move_data_to_device(data_batch)
                 
-                predictions = self.model(users, items, features)
+                predictions = self.model(users, items, features, images)
                 loss = loss_fn(predictions, ratings)
                 
                 total_loss += loss.item()
@@ -172,13 +177,13 @@ class NCFRecommender:
         return total_loss / num_batches
 
     def _move_data_to_device(self, data_batch):
-        users, items, ratings, features = data_batch
+        users, items, ratings, features, images = data_batch
 
         users = users.to(self.device)
         items = items.to(self.device)
         ratings = ratings.to(self.device)
 
-        if self.mlp_feature_dims is not None:
+        if self.mlp_feature_dims is not None and features is not None:
             for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
                 if input_dim == 1:
                     features[feature] = features[feature].to(self.device)
@@ -188,9 +193,18 @@ class NCFRecommender:
                     offsets = offsets.to(self.device)
                     features[feature] = (indices, offsets)
 
-        return users, items, ratings, features
+        if self.image_dim is not None and images is not None:
+            images = images.to(self.device)
 
-    def predict(self, users: np.ndarray, items: np.ndarray, feature_tensors: dict | None = None):
+        return users, items, ratings, features, images
+
+    def predict(
+            self,
+            users: np.ndarray,
+            items: np.ndarray,
+            feature_tensors: dict | None = None,
+            image_tensors = None
+    ):
         self.model.eval()
 
         num_users = len(users)
@@ -205,8 +219,11 @@ class NCFRecommender:
         if self.feature_values is not None and feature_tensors is None:
             feature_tensors = self._get_batch_feature_tensors(items, num_users)
 
+        if image_tensors is not None:
+            image_tensors = image_tensors.repeat(num_users, 1, 1, 1)
+
         with torch.no_grad():
-            predictions = self.model(users_tensor, items_tensor, feature_tensors)
+            predictions = self.model(users_tensor, items_tensor, feature_tensors, image_tensors)
 
         return predictions.view(num_users, num_items)
 
@@ -278,11 +295,18 @@ class NCFRecommender:
                         end_item_idx = min(j + current_item_batch_size, num_items)
                         item_batch = items[j:end_item_idx]
 
+                        feature_tensors = None
                         if feature_tensors_cache is not None and actual_user_batch_size == current_user_batch_size:
-                            batch_scores = self.predict(user_batch, item_batch, feature_tensors_cache[item_batch_idx])
+                            feature_tensors = feature_tensors_cache[item_batch_idx]
                             item_batch_idx += 1
-                        else:
-                            batch_scores = self.predict(user_batch, item_batch)
+
+                        image_tensor = None
+                        if self.image_dim is not None:
+                            image_tensor = torch.zeros((len(item_batch), 3, 224, 224), device=self.device)
+                            for i, item_idx in enumerate(item_batch):
+                                image_tensor[i] = self.image_dataloader.get_tensor(item_idx)
+
+                        batch_scores = self.predict(user_batch, item_batch, feature_tensors, image_tensor)
 
                         # Store scores in the all_scores tensor
                         all_scores[:, j:end_item_idx] = batch_scores
@@ -293,7 +317,7 @@ class NCFRecommender:
                     except RuntimeError as e:
                         # Handle OOM errors by reducing batch size and retrying
                         if "CUDA out of memory" in str(e):
-                            current_user_batch_size, current_item_batch_size = self._handle_oom_error(current_item_batch_size)
+                            current_user_batch_size, current_item_batch_size = self._handle_oom_error(current_user_batch_size, current_item_batch_size)
                             # Don't advance the index - retry with smaller batch
                             continue
                         else:
