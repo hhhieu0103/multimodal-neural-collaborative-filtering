@@ -52,9 +52,10 @@ class NCFRecommender:
         if self.mlp_additional_features is not None:
             if df_features is None:
                 raise ValueError('The model is using additional features, but df_features is None')
-            df_features = df_features.copy()
-            df_features.set_index('item_id', inplace=True)
-            self.feature_values = df_features.to_dict(orient='series')
+            else:
+                df_features = df_features.copy()
+                df_features.set_index('item_id', inplace=True)
+                self.feature_values = df_features.to_dict(orient='series')
         
         self.unique_users = torch.tensor(unique_users)
         self.unique_items = torch.tensor(unique_items)
@@ -265,7 +266,7 @@ class NCFRecommender:
                 # Initialize tensor to store all scores for this batch
                 all_scores = torch.zeros((actual_user_batch_size, num_items), device=self.device)
 
-                if feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
+                if self.mlp_additional_features is not None and feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
                     feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size, actual_user_batch_size)
 
                 # Process items in batches for the current user batch
@@ -299,7 +300,7 @@ class NCFRecommender:
                             # Re-raise other errors
                             raise e
 
-                print('Time taken to create additional features:', time.time() - start, 'seconds')
+                print('Time taken to process a user batch:', time.time() - start, 'seconds')
                 # Extract top-k items for each user in the batch
                 self._extract_top_k_items(user_batch, all_scores, k, predictions)
 

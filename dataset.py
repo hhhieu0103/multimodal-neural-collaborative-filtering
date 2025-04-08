@@ -27,7 +27,7 @@ class NCFDataset(Dataset):
         self.ratings = torch.tensor(ratings, dtype=torch.float32)
 
         self.feature_dims = feature_dims
-        self.df_features = df_features.copy().set_index('item_id')
+        self.df_features = df_features.copy().set_index('item_id') if df_features is not None else None
 
     def __len__(self):
         """Get the number of interactions in the dataset"""

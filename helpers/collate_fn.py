@@ -11,9 +11,9 @@ def collate_fn(batch):
     ratings = torch.stack(ratings)
 
     features = None
-    if feature_dicts is not None:
+    sample_dict = feature_dicts[0]
+    if sample_dict is not None:
         features = {}
-        sample_dict = feature_dicts[0]
         feature_names = list(sample_dict.keys())
         for name in feature_names:
             feature_tensors = [feature_dict[name] for feature_dict in feature_dicts]
