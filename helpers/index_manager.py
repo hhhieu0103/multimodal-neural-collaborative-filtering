@@ -243,6 +243,18 @@ class IndexManager:
 
         return result
 
+    def item_idx(self, item_id):
+        return self.item_id_to_idx.get(item_id, None)
+
+    def item_id(self, item_idx):
+        return self.item_idx_to_id.get(item_idx, None)
+
+    def user_idx(self, user_id):
+        return self.user_id_to_idx.get(user_id, None)
+
+    def user_id(self, user_idx):
+        return self.user_idx_to_id.get(user_idx, None)
+
     def save(self, filepath):
         """Save the index mappings to a file"""
         import json
