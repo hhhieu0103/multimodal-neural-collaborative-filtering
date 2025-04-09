@@ -1,6 +1,7 @@
 from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 import math
+import torchvision.transforms as transforms
 
 def dominant_edge_color_padding(img):
     # Resize width to 224
@@ -162,3 +163,8 @@ def center_tiling_with_blur(img):
     result = Image.composite(padded, blurred, mask)
 
     return result
+
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
