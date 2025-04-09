@@ -34,3 +34,10 @@ def collate_fn(batch):
         images = None
 
     return users, items, ratings, features, images
+
+
+def worker_init_fn(worker_id):
+    worker_info = torch.utils.data.get_worker_info()
+    dataset = worker_info.dataset  # the dataset copy in this worker process
+
+    dataset.image_dataloader._open_lmdb()
