@@ -42,7 +42,6 @@ class IndexManager:
 
         # Add items from metadata if provided
         if df_metadata is not None:
-            metadata_id_col = item_col
             if df_metadata.index.name == item_col:
                 metadata_items = set(df_metadata.index)
             elif item_col in df_metadata.columns:
