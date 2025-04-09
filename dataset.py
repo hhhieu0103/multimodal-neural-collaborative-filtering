@@ -1,11 +1,7 @@
 import torch
 import pandas as pd
 from torch.utils.data import Dataset
-from PIL import Image
-from helpers.index_manager import IndexManager
-from helpers.image_preprocessing import transform
-from helpers.image_cacher import SingleCache
-import os
+from helpers.h5_dataloader import H5DataLoader
 
 class NCFDataset(Dataset):
     def __init__(
@@ -16,9 +12,7 @@ class NCFDataset(Dataset):
             rating_col: str = 'rating_imp',
             feature_dims = None, # Dictionary, key: feature, value: (input, output)
             df_features = None,
-            index_manager: IndexManager = None,
-            image_transform = transform,
-            image_dir = 'D:/header-image/',
+            image_dataloader: H5DataLoader=None,
     ):
         """
         Dataset for NCF model with support for time features and metadata.
@@ -37,12 +31,7 @@ class NCFDataset(Dataset):
         self.feature_dims = feature_dims
         self.df_features = df_features.copy().set_index('item_id') if df_features is not None else None
 
-        self.use_image = index_manager is not None
-        self.index_manager = index_manager
-        self.image_transform = image_transform
-        self.image_dir = image_dir
-        self.image_cacher = SingleCache(3000)
-        self.missing_image_indices = set()
+        self.image_dataloader = image_dataloader
 
     def __len__(self):
         """Get the number of interactions in the dataset"""
@@ -63,30 +52,8 @@ class NCFDataset(Dataset):
                     features_idx[feature] = torch.tensor(feature_value, dtype=torch.long)
 
         image_tensor = None
-        if self.use_image:
+        if self.image_dataloader is not None:
             item_idx = self.items[idx].item()
-
-            if item_idx in self.missing_image_indices:
-                image_tensor = torch.zeros(3, 224, 224)
-            else:
-                image_tensor = self.image_cacher.get_image_tensor(item_idx)
-
-                if image_tensor is None:
-                    image_tensor = self._get_image_tensor(item_idx)
-
-                    if image_tensor is None:
-                        self.missing_image_indices.add(item_idx)
-                        image_tensor = torch.zeros(3, 224, 224)
-                    else:
-                        self.image_cacher.insert_image_tensor(item_idx, image_tensor)
+            image_tensor = self.image_dataloader.get_tensor(item_idx)
 
         return self.users[idx], self.items[idx], self.ratings[idx], features_idx, image_tensor
-
-    def _get_image_tensor(self, item_idx):
-        item_id = self.index_manager.item_id(item_idx)
-        image_path = os.path.join(self.image_dir, f'{item_id}.jpg')
-        try:
-            img = Image.open(image_path).convert('RGB')
-            return transform(img)
-        except FileNotFoundError:
-            return None
