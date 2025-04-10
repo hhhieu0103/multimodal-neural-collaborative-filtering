@@ -1,3 +1,10 @@
+import enum
+
+class CacheType(enum.Enum):
+    DOUBLE = 1
+    SINGLE = 2
+    UNLIMITED = 3
+
 class DoubleCache:
     def __init__(self, main_size=1000, queue_size=200):
         self.main_size = main_size
@@ -116,3 +123,13 @@ class SingleCache:
 
     def hit_rate(self):
         return self.hit / (self.hit + self.miss)
+
+class UnlimitedCache:
+    def __init__(self):
+        self.cache = {}
+
+    def get_image_tensor(self, item_idx):
+        return self.cache.get(item_idx, None)
+
+    def insert_image_tensor(self, item_idx, tensor):
+        self.cache[item_idx] = tensor
