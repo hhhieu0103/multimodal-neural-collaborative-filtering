@@ -11,6 +11,9 @@ from dataset import NCFDataset
 from recom_ncf import NCFRecommender
 from evaluation import Evaluation
 
+from helpers.image_dataloader import ImageDataLoader
+from helpers.dataloader_custom_functions import collate_fn, worker_init_fn
+
 class NCFTuner:
     def __init__(
         self,
@@ -19,10 +22,11 @@ class NCFTuner:
         test_data,
         unique_users,
         unique_items,
-        additional_features=None, # Dictionary where keys are feature names, values are lists of output dimensions
+        feature_dims=None, # Dictionary where keys are feature names, values are lists of output dimensions
         df_features=None,
         k_values=[50, 20, 10],
-        results_dir='tuning_results'
+        results_dir='tuning_results',
+        image_dataloader: ImageDataLoader = None
     ):
         self.train_data = train_data
         self.val_data = val_data
@@ -32,7 +36,8 @@ class NCFTuner:
         self.results_dir = results_dir
         self.k_values = k_values
         self.df_features = df_features
-        self.additional_features = additional_features
+        self.feature_dims = feature_dims
+        self.image_dataloader = image_dataloader
         
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
@@ -42,7 +47,7 @@ class NCFTuner:
             'factors': [8, 16, 32, 64],
             'mlp_user_item_dim': [32, 64, 128],
             'learning_rate': [0.0001, 0.001, 0.01],
-            'epochs': [1],
+            'epochs': [100],
             'optimizer': ['sgd', 'adam', 'adagrad'],
             'dropout': [0.0, 0.2, 0.5],
             'weight_decay': [0.0, 0.0001, 0.00001],
@@ -61,22 +66,27 @@ class NCFTuner:
     def run_experiment(self, params):
         """Run a single experiment with the given parameters"""
         print(f"Running experiment with params: {params}")
+        dataset_params = {
+            'df_features': self.df_features,
+            'image_dataloader': self.image_dataloader,
+            'feature_dims': params.get('mlp_feature_dims', None),
+        }
 
         # Create data loaders
-        train_dataset = NCFDataset(df_interaction=self.train_data, additional_features=params.get('mlp_additional_features', None))
-        val_dataset = NCFDataset(df_interaction=self.test_data, additional_features=params.get('mlp_additional_features', None))
+        train_dataset = NCFDataset(df_interaction=self.train_data, **dataset_params)
+        val_dataset = NCFDataset(df_interaction=self.val_data, **dataset_params)
 
         dataloader_params = {
             'batch_size': params['batch_size'],
-            'shuffle': True,
             'num_workers': 4,
             'persistent_workers': True,
             'prefetch_factor': 2,
-            'pin_memory': True
+            'pin_memory': True,
+            'collate_fn': collate_fn,
         }
         
-        train_loader = DataLoader(train_dataset, **dataloader_params)
-        val_loader = DataLoader(val_dataset, **dataloader_params)
+        train_loader = DataLoader(train_dataset, shuffle=True, **dataloader_params)
+        val_loader = DataLoader(val_dataset, shuffle=False, **dataloader_params)
 
         recommender_params = {
             'unique_users': self.unique_users,
@@ -86,14 +96,16 @@ class NCFTuner:
             'learning_rate': params['learning_rate'],
             'epochs': params['epochs'],
             'optimizer': params['optimizer'],
-            'mlp_additional_features': params.get('mlp_additional_features', None),
+            'mlp_feature_dims': params.get('mlp_feature_dims', None),
+            'image_dataloader': self.image_dataloader,
+            'image_dim': params.get('image_dim', None),
         }
 
         # Create model with the specified parameters
         model = NCFRecommender(**recommender_params)
         
         # Train the model
-        model.fit(train_loader, val_loader, self.df_features)
+        model.fit(train_data=train_loader, val_data=val_loader)
         
         # Evaluate the model at different k values
         eval_results = {}
@@ -102,6 +114,9 @@ class NCFTuner:
             'test_data': self.test_data,
             'max_k': max(self.k_values),
         }
+
+        if self.image_dataloader is not None:
+            self.image_dataloader.open_lmdb()
 
         evaluator = Evaluation(**evaluator_params)
         for k in self.k_values:
@@ -143,15 +158,15 @@ class NCFTuner:
                 idx = np.random.randint(0, len(values))
                 params[key] = values[idx]
 
-            if self.additional_features is not None:
-                params['mlp_additional_features'] = {}
-                num_selected_features = np.random.randint(1, len(self.additional_features))
-                selected_features = np.random.choice(list(self.additional_features.keys()), num_selected_features, replace=False)
+            if self.feature_dims is not None:
+                params['mlp_feature_dims'] = {}
+                num_selected_features = np.random.randint(1, len(self.feature_dims))
+                selected_features = np.random.choice(list(self.feature_dims.keys()), num_selected_features, replace=False)
 
                 for feature in selected_features:
-                    output_dims = self.additional_features[feature]
+                    output_dims = self.feature_dims[feature]
                     idx = np.random.randint(0, len(output_dims))
-                    params['mlp_additional_features'][feature] = output_dims[idx]
+                    params['mlp_feature_dims'][feature] = output_dims[idx]
         
             params_hashable = tuple(
                 (k, tuple(v)) if isinstance(v, list) else (k, v)
