@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 
 class MLP(nn.Module):
     def __init__(
@@ -33,7 +32,7 @@ class MLP(nn.Module):
                 mlp_input_dim += output_dim
 
         if image_dim is not None:
-            self.image_layer = ImageModule(output_dim=image_dim)
+            self.image_layer = nn.Linear(512, image_dim)
             mlp_input_dim += image_dim
         else:
             self.image_layer = None
@@ -118,27 +117,6 @@ class GMF(nn.Module):
         item_embed = self.item_embedding(item)
         vector = torch.mul(user_embed, item_embed)
         return vector
-
-class ImageModule(nn.Module):
-    def __init__(self, output_dim=128, freeze_layers=True):
-        super(ImageModule, self).__init__()
-        # Load pretrained ResNet
-        self.model = models.resnet34()
-
-        # Freeze ResNet layers if specified
-        if freeze_layers:
-            for param in self.model.parameters():
-                param.requires_grad = False
-
-        # Replace final fully connected layer
-        in_features = self.model.fc.in_features
-        self.model.fc = nn.Sequential(
-            nn.Linear(in_features, output_dim),
-            nn.ReLU()
-        )
-
-    def forward(self, x):
-        return self.model(x)
 
 class NCF(nn.Module):
     def __init__(
