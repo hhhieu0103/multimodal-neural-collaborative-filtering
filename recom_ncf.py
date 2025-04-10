@@ -8,7 +8,7 @@ import pandas as pd
 import gc
 import time
 import math
-from helpers.h5_dataloader import H5DataLoader
+from helpers.image_dataloader import ImageDataLoader
 
 class BPRLoss(nn.Module):
     def __init__(self):
@@ -27,7 +27,7 @@ class NCFRecommender:
         mlp_user_item_dim=32,
         mlp_feature_dims=None, # Dictionary where keys are features, values are tuples (input, output)
         image_dim=None,
-        image_dataloader: H5DataLoader=None,
+        image_dataloader: ImageDataLoader=None,
         df_features: pd.DataFrame=None,
         num_mlp_layers=4,
         layers_ratio=2,
@@ -183,7 +183,7 @@ class NCFRecommender:
         items = items.to(self.device)
         ratings = ratings.to(self.device)
 
-        if self.mlp_feature_dims is not None and features is not None:
+        if self.mlp_feature_dims is not None and len(features) > 0:
             for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
                 if input_dim == 1:
                     features[feature] = features[feature].to(self.device)
@@ -192,9 +192,13 @@ class NCFRecommender:
                     indices = indices.to(self.device)
                     offsets = offsets.to(self.device)
                     features[feature] = (indices, offsets)
+        else:
+            features = None
 
-        if self.image_dim is not None and images is not None:
+        if self.image_dim is not None and len(images) > 0:
             images = images.to(self.device)
+        else:
+            images = None
 
         return users, items, ratings, features, images
 
@@ -220,7 +224,7 @@ class NCFRecommender:
             feature_tensors = self._get_batch_feature_tensors(items, num_users)
 
         if image_tensors is not None:
-            image_tensors = image_tensors.repeat(num_users, 1, 1, 1)
+            image_tensors = image_tensors.repeat(num_users, 1)
 
         with torch.no_grad():
             predictions = self.model(users_tensor, items_tensor, feature_tensors, image_tensors)
@@ -267,7 +271,7 @@ class NCFRecommender:
         feature_tensors_cache = None
         item_batch_idx = 0
 
-        print(f"Processing predictions for {num_users} users and {num_items} items")
+        # print(f"Processing predictions for {num_users} users and {num_items} items")
 
         with torch.no_grad():
             i = 0
@@ -284,11 +288,11 @@ class NCFRecommender:
                 all_scores = torch.zeros((actual_user_batch_size, num_items), device=self.device)
 
                 if self.mlp_feature_dims is not None and feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
-                    feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size, actual_user_batch_size)
+                    feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size,
+                                                                              actual_user_batch_size)
 
                 # Process items in batches for the current user batch
                 j = 0
-                start = time.time()
                 while j < num_items:
                     try:
                         # Get the current item batch
@@ -302,9 +306,7 @@ class NCFRecommender:
 
                         image_tensor = None
                         if self.image_dim is not None:
-                            image_tensor = torch.zeros((len(item_batch), 3, 224, 224), device=self.device)
-                            for i, item_idx in enumerate(item_batch):
-                                image_tensor[i] = self.image_dataloader.get_tensor(item_idx)
+                            image_tensor = self.image_dataloader.get_batch_tensors(item_batch)
 
                         batch_scores = self.predict(user_batch, item_batch, feature_tensors, image_tensor)
 
@@ -317,21 +319,22 @@ class NCFRecommender:
                     except RuntimeError as e:
                         # Handle OOM errors by reducing batch size and retrying
                         if "CUDA out of memory" in str(e):
-                            current_user_batch_size, current_item_batch_size = self._handle_oom_error(current_user_batch_size, current_item_batch_size)
+                            current_user_batch_size, current_item_batch_size = self._handle_oom_error(
+                                current_user_batch_size, current_item_batch_size)
                             # Don't advance the index - retry with smaller batch
                             continue
                         else:
                             # Re-raise other errors
                             raise e
 
-                print('Time taken to process a user batch:', time.time() - start, 'seconds')
                 # Extract top-k items for each user in the batch
                 self._extract_top_k_items(user_batch, all_scores, k, predictions)
 
                 item_batch_idx = 0
                 if prev_item_batch_size != current_item_batch_size:
                     prev_item_batch_size = current_item_batch_size
-                    current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size, current_item_batch_size)
+                    current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size,
+                                                                                               current_item_batch_size)
 
                 # Clean up batch memory
                 del all_scores

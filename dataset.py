@@ -1,7 +1,7 @@
 import torch
 import pandas as pd
 from torch.utils.data import Dataset
-from helpers.h5_dataloader import H5DataLoader
+from helpers.image_dataloader import ImageDataLoader
 
 class NCFDataset(Dataset):
     def __init__(
@@ -12,7 +12,7 @@ class NCFDataset(Dataset):
             rating_col: str = 'rating_imp',
             feature_dims = None, # Dictionary, key: feature, value: (input, output)
             df_features = None,
-            image_dataloader: H5DataLoader=None,
+            image_dataloader: ImageDataLoader=None,
     ):
         """
         Dataset for NCF model with support for time features and metadata.
@@ -54,6 +54,7 @@ class NCFDataset(Dataset):
         image_tensor = None
         if self.image_dataloader is not None:
             item_idx = self.items[idx].item()
-            image_tensor = self.image_dataloader.get_tensor(item_idx)
+            image_features = self.image_dataloader.get_tensor(item_idx)
+            image_tensor = torch.tensor(image_features, dtype=torch.float32)
 
         return self.users[idx], self.items[idx], self.ratings[idx], features_idx, image_tensor

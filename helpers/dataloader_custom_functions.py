@@ -28,10 +28,9 @@ def collate_fn(batch):
                 features[name] = (indices, offsets)
 
     sample_image = images[0]
+    images = None
     if sample_image is not None:
         images = torch.stack(images)
-    else:
-        images = None
 
     return users, items, ratings, features, images
 
@@ -40,4 +39,4 @@ def worker_init_fn(worker_id):
     worker_info = torch.utils.data.get_worker_info()
     dataset = worker_info.dataset  # the dataset copy in this worker process
 
-    dataset.image_dataloader._open_lmdb()
+    dataset.image_dataloader.open_lmdb()
