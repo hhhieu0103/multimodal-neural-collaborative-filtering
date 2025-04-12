@@ -222,6 +222,14 @@ class NCFRecommender:
 
         if self.feature_values is not None and feature_tensors is None:
             feature_tensors = self._get_batch_feature_tensors(items, num_users)
+            for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
+                if input_dim == 1:
+                    feature_tensors[feature] = feature_tensors[feature].to(self.device)
+                else:
+                    indices, offsets = feature_tensors[feature]
+                    indices = indices.to(self.device)
+                    offsets = offsets.to(self.device)
+                    feature_tensors[feature] = (indices, offsets)
 
         if image_tensors is not None:
             image_tensors = image_tensors.repeat(num_users, 1)
@@ -267,7 +275,7 @@ class NCFRecommender:
         current_user_batch_size = user_batch_size
         current_item_batch_size = item_batch_size
 
-        prev_item_batch_size = None
+        prev_batch_size = (None, None)
         feature_tensors_cache = None
         item_batch_idx = 0
 
@@ -287,9 +295,8 @@ class NCFRecommender:
                 # Initialize tensor to store all scores for this batch
                 all_scores = torch.zeros((actual_user_batch_size, num_items), device=self.device)
 
-                if self.mlp_feature_dims is not None and feature_tensors_cache is None and current_item_batch_size == prev_item_batch_size:
-                    feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size,
-                                                                              actual_user_batch_size)
+                if self.mlp_feature_dims is not None and feature_tensors_cache is None and current_user_batch_size == prev_batch_size[0] and current_item_batch_size == prev_batch_size[1]:
+                    feature_tensors_cache = self._build_feature_tensors_cache(items, current_item_batch_size, actual_user_batch_size)
 
                 # Process items in batches for the current user batch
                 j = 0
@@ -302,6 +309,14 @@ class NCFRecommender:
                         feature_tensors = None
                         if feature_tensors_cache is not None and actual_user_batch_size == current_user_batch_size:
                             feature_tensors = feature_tensors_cache[item_batch_idx]
+                            for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
+                                if input_dim == 1:
+                                    feature_tensors[feature] = feature_tensors[feature].to(self.device)
+                                else:
+                                    indices, offsets = feature_tensors[feature]
+                                    indices = indices.to(self.device)
+                                    offsets = offsets.to(self.device)
+                                    feature_tensors[feature] = (indices, offsets)
                             item_batch_idx += 1
 
                         image_tensor = None
@@ -331,10 +346,9 @@ class NCFRecommender:
                 self._extract_top_k_items(user_batch, all_scores, k, predictions)
 
                 item_batch_idx = 0
-                if prev_item_batch_size != current_item_batch_size:
-                    prev_item_batch_size = current_item_batch_size
-                    current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size,
-                                                                                               current_item_batch_size)
+                if prev_batch_size[0] != current_user_batch_size or prev_batch_size[1] != current_item_batch_size:
+                    prev_batch_size = current_user_batch_size, current_item_batch_size
+                    current_user_batch_size, current_item_batch_size = self._adjust_batch_size(current_user_batch_size, current_item_batch_size)
 
                 # Clean up batch memory
                 del all_scores
@@ -364,7 +378,7 @@ class NCFRecommender:
             if input_dim == 1:
                 # For numeric features - more efficient handling
                 feature_values = np.array(self.feature_values[feature][items])
-                tensor = torch.tensor(feature_values, dtype=torch.float32, device=self.device)
+                tensor = torch.tensor(feature_values, dtype=torch.float32)
                 feature_tensors[feature] = tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
             else:
                 all_indices = []
@@ -379,7 +393,7 @@ class NCFRecommender:
                 all_offsets.pop()
 
                 # Convert to tensors
-                indices_tensor = torch.tensor(all_indices, dtype=torch.long, device=self.device)
+                indices_tensor = torch.tensor(all_indices, dtype=torch.long)
 
                 # Now repeat for each user
                 repeated_indices = indices_tensor.repeat(num_users)
@@ -391,7 +405,7 @@ class NCFRecommender:
                 for u in range(num_users):
                     user_offsets.extend([offset + u * last_offset for offset in all_offsets])
 
-                offsets_tensor = torch.tensor(user_offsets, dtype=torch.long, device=self.device)
+                offsets_tensor = torch.tensor(user_offsets, dtype=torch.long)
 
                 feature_tensors[feature] = (repeated_indices, offsets_tensor)
         return feature_tensors
@@ -412,19 +426,19 @@ class NCFRecommender:
     def _adjust_batch_size(self, current_user_batch_size, current_item_batch_size, min_user_batch_size=64, min_item_batch_size=128):
         """Adjust item batch size based on current GPU memory usage"""
         gpu_memory_usage = self._get_gpu_memory_usage()
-        is_stable = False
 
         if gpu_memory_usage >= 0.9:
 
+            print('Memory usage:', gpu_memory_usage)
             if current_item_batch_size > min_item_batch_size:
                 new_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
                 if new_item_batch_size != current_item_batch_size:
-                    print('Memory usage:', gpu_memory_usage ,'. Reduced item batch size from', current_item_batch_size, 'to', new_item_batch_size)
+                    print('Reduced item batch size from', current_item_batch_size, 'to', new_item_batch_size)
                     current_item_batch_size = new_item_batch_size
             elif current_user_batch_size > min_user_batch_size:
                 new_user_batch_size = max(min_user_batch_size, current_user_batch_size // 2)
                 if new_user_batch_size != current_user_batch_size:
-                    print('Memory usage:', gpu_memory_usage ,'. Reduced user batch size from', current_user_batch_size, 'to', new_user_batch_size)
+                    print('Reduced user batch size from', current_user_batch_size, 'to', new_user_batch_size)
                     current_user_batch_size = new_user_batch_size
             else:
                 current_user_batch_size = min_user_batch_size
