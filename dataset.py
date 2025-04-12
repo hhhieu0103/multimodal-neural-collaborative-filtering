@@ -1,7 +1,7 @@
 import torch
 import pandas as pd
 from torch.utils.data import Dataset
-from helpers.image_dataloader import ImageDataLoader
+from helpers.mem_map_dataloader import MemMapDataLoader
 
 class NCFDataset(Dataset):
     def __init__(
@@ -12,7 +12,7 @@ class NCFDataset(Dataset):
             rating_col: str = 'rating_imp',
             feature_dims = None, # Dictionary, key: feature, value: (input, output)
             df_features = None,
-            image_dataloader: ImageDataLoader=None,
+            image_dataloader: MemMapDataLoader=None,
     ):
         """
         Dataset for NCF model with support for time features and metadata.

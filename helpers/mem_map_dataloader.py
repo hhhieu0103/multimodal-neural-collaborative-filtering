@@ -1,9 +1,9 @@
-from helpers.image_cacher import DoubleCache, SingleCache, UnlimitedCache, CacheType
+from helpers.cache import DoubleCache, SingleCache, UnlimitedCache, CacheType
 import lmdb
 import numpy as np
 import torch
 
-class ImageDataLoader:
+class MemMapDataLoader:
     def __init__(self, file_dir, index_manager, cache_size = 1000, cache_type: CacheType = CacheType.DOUBLE):
         self.missing_idx = set()
         self.index_manager = index_manager
@@ -24,18 +24,16 @@ class ImageDataLoader:
         if item_idx in self.missing_idx:
             return torch.zeros(512, device=device)
 
-        # Find item in most used cache
-        tensor = self.cache.get_image_tensor(item_idx)
+        tensor = self.cache.get(item_idx)
 
         if tensor is not None:
             return tensor
 
-        # Find item in all files
         item_id = self.index_manager.item_id(item_idx)
         tensor = self._get_tensor_from_file(item_id, device)
 
         if tensor is not None:
-            self.cache.insert_image_tensor(item_idx, tensor)
+            self.cache.insert(item_idx, tensor)
             return tensor
 
         self.missing_idx.add(item_idx)
@@ -58,7 +56,7 @@ class ImageDataLoader:
             if item_idx in self.missing_idx:
                 continue
 
-            tensor = self.cache.get_image_tensor(item_idx)
+            tensor = self.cache.get(item_idx)
             if tensor is not None:
                 batch_features[i] = tensor
             else:
@@ -81,7 +79,7 @@ class ImageDataLoader:
                     feature = np.frombuffer(data, dtype=np.float32)
                     batch_features[pos] = feature
                     item_idx = item_indices[pos]
-                    self.cache.insert_image_tensor(item_idx, feature)
+                    self.cache.insert(item_idx, feature)
                 else:
                     self.missing_idx.add(item_idx)
 

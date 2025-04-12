@@ -11,7 +11,7 @@ from dataset import NCFDataset
 from recom_ncf import NCFRecommender
 from evaluation import Evaluation
 
-from helpers.image_dataloader import ImageDataLoader
+from helpers.mem_map_dataloader import MemMapDataLoader
 from helpers.dataloader_custom_functions import collate_fn, worker_init_fn
 
 class NCFTuner:
@@ -26,7 +26,7 @@ class NCFTuner:
         df_features=None,
         k_values=[50, 20, 10],
         results_dir='tuning_results',
-        image_dataloader: ImageDataLoader = None
+        image_dataloader: MemMapDataLoader = None
     ):
         self.train_data = train_data
         self.val_data = val_data

@@ -17,48 +17,47 @@ class DoubleCache:
         self.hit = 0
         self.miss = 0
 
-    def get_image_tensor(self, item_idx):
-        image = self.main.get(item_idx, None)
-        tensor = None
-        if image is not None:
-            self.main[item_idx]['count'] += 1
-            if self.main_min == item_idx:
+    def get(self, key, default=None):
+        value = self.main.get(key, None)
+        if value is not None:
+            self.main[key]['count'] += 1
+            if self.main_min == key:
                 self.main_min = min(self.main, key=lambda x: self.main[x]['count'])
             self.hit += 1
-            tensor = self.main[item_idx]['tensor']
 
-        image = self.queue.get(item_idx, None)
-        if image is not None:
-            self.queue[item_idx]['count'] += 1
-            if self.queue_min == item_idx:
+        value = self.queue.get(key, None)
+        if value is not None:
+            self.queue[key]['count'] += 1
+            if self.queue_min == key:
                 self.queue_min = min(self.queue, key=lambda x: self.queue[x]['count'])
 
             if self.queue_max is None:
-                self.queue_max = item_idx
+                self.queue_max = key
             else:
                 queue_max_count = self.queue[self.queue_max]['count']
-                item_count = self.queue[item_idx]['count']
+                value_count = self.queue[key]['count']
 
-                if item_count > queue_max_count:
-                    self.queue_max = item_idx
+                if value_count > queue_max_count:
+                    self.queue_max = key
 
-            tensor = self.queue[item_idx]['tensor']
             self._update_main_cache()
             self.hit += 1
 
-        if tensor is None:
+        if value is None:
             self.miss += 1
-        return tensor
+            return default
 
-    def insert_image_tensor(self, item_idx, tensor):
+        return value
+
+    def insert(self, key, value):
         if len(self.main) < self.main_size:
-            self.main[item_idx] = {'count': 1, 'tensor': tensor}
-            self.main_min = item_idx
+            self.main[key] = {'count': 1, 'value': value}
+            self.main_min = key
             return
 
         if len(self.queue) < self.queue_size:
-            self.queue[item_idx] = {'count': 1, 'tensor': tensor}
-            self.queue_min = item_idx
+            self.queue[key] = {'count': 1, 'value': value}
+            self.queue_min = key
             return
 
         if self.queue_min is None:
@@ -66,8 +65,8 @@ class DoubleCache:
         if self.queue_min == self.queue_max:
             self.queue_max = None
         self.queue.pop(self.queue_min)
-        self.queue[item_idx] = {'count': 1, 'tensor': tensor}
-        self.queue_min = item_idx
+        self.queue[key] = {'count': 1, 'value': value}
+        self.queue_min = key
 
     def _update_main_cache(self):
         if self.main_min is None:
@@ -93,33 +92,33 @@ class DoubleCache:
         return self.hit / (self.hit + self.miss)
 
 class SingleCache:
-    def __init__(self, main_size=1000):
-        self.main_size = main_size
-        self.main = {}
-        self.min_idx = None
+    def __init__(self, size=1000):
+        self.size = size
+        self.cache = {}
+        self.min_key = None
         self.hit = 0
         self.miss = 0
 
-    def get_image_tensor(self, item_idx):
-        image = self.main.get(item_idx, None)
-        if image is not None:
+    def get(self, key, default=None):
+        value = self.cache.get(key, default)
+        if value is not None:
             self.hit += 1
-            self.main[item_idx]['count'] += 1
-            if self.min_idx == item_idx:
-                self.min_idx = min(self.main, key=lambda x: self.main[x]['count'])
-            return self.main[item_idx]['tensor']
+            self.cache[key]['count'] += 1
+            if self.min_key == key:
+                self.min_key = min(self.cache, key=lambda x: self.cache[x]['count'])
+            return self.cache[key]['value']
 
         self.miss += 1
         return None
 
-    def insert_image_tensor(self, item_idx, tensor):
-        if len(self.main) >= self.main_size:
-            if self.min_idx is None:
-                self.min_idx = min(self.main, key=lambda x: self.main[x]['count'])
-            self.main.pop(self.min_idx)
+    def insert(self, key, value):
+        if len(self.cache) >= self.size:
+            if self.min_key is None:
+                self.min_key = min(self.cache, key=lambda x: self.cache[x]['count'])
+            self.cache.pop(self.min_key)
 
-        self.main[item_idx] = {'count': 1, 'tensor': tensor}
-        self.min_idx = item_idx
+        self.cache[key] = {'count': 1, 'value': value}
+        self.min_key = key
 
     def hit_rate(self):
         return self.hit / (self.hit + self.miss)
@@ -128,8 +127,8 @@ class UnlimitedCache:
     def __init__(self):
         self.cache = {}
 
-    def get_image_tensor(self, item_idx):
-        return self.cache.get(item_idx, None)
+    def get(self, key, default=None):
+        return self.cache.get(key, default)
 
-    def insert_image_tensor(self, item_idx, tensor):
-        self.cache[item_idx] = tensor
+    def insert(self, key, value):
+        self.cache[key] = value
