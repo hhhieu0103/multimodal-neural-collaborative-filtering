@@ -78,9 +78,9 @@ class NCFTuner:
 
         dataloader_params = {
             'batch_size': params['batch_size'],
-            'num_workers': 4,
-            'persistent_workers': True,
-            'prefetch_factor': 2,
+            # 'num_workers': 4,
+            # 'persistent_workers': True,
+            # 'prefetch_factor': 2,
             'pin_memory': True,
             'collate_fn': collate_fn,
         }
@@ -99,6 +99,7 @@ class NCFTuner:
             'mlp_feature_dims': params.get('mlp_feature_dims', None),
             'image_dataloader': self.image_dataloader,
             'image_dim': params.get('image_dim', None),
+            'df_features': self.df_features,
         }
 
         # Create model with the specified parameters
@@ -164,14 +165,25 @@ class NCFTuner:
                 selected_features = np.random.choice(list(self.feature_dims.keys()), num_selected_features, replace=False)
 
                 for feature in selected_features:
-                    output_dims = self.feature_dims[feature]
+                    input_dim = self.feature_dims[feature][0]
+                    output_dims = self.feature_dims[feature][1]
                     idx = np.random.randint(0, len(output_dims))
-                    params['mlp_feature_dims'][feature] = output_dims[idx]
+                    params['mlp_feature_dims'][feature] = (input_dim, output_dims[idx])
         
-            params_hashable = tuple(
-                (k, tuple(v)) if isinstance(v, list) else (k, v)
-                for k, v in sorted(params.items())
-            )
+            # params_hashable = tuple(
+            #     (k, tuple(v)) if isinstance(v, list) else (k, v)
+            #     for k, v in sorted(params.items())
+            # )
+
+            params_hashable = []
+            for k, v in sorted(params.items()):
+                if isinstance(v, list):
+                    params_hashable.append((k, tuple(v)))
+                elif isinstance(v, dict):
+                    params_hashable.append((k, tuple(v.items())))
+                else:
+                    params_hashable.append((k, v))
+            params_hashable = tuple(params_hashable)
             
             if prevent_duplicates and params_hashable in tried_configs:
                 continue
