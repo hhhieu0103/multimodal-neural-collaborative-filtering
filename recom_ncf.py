@@ -36,7 +36,7 @@ def _adjust_batch_size(current_user_batch_size, current_item_batch_size, min_use
     """Adjust item batch size based on current GPU memory usage"""
     gpu_memory_usage = _get_gpu_memory_usage()
 
-    if gpu_memory_usage >= 0.9:
+    if gpu_memory_usage >= 0.95:
 
         print('Memory usage:', gpu_memory_usage)
         if current_item_batch_size > min_item_batch_size:
@@ -53,7 +53,7 @@ def _adjust_batch_size(current_user_batch_size, current_item_batch_size, min_use
             current_user_batch_size = min_user_batch_size
             current_item_batch_size = min_item_batch_size
 
-    elif gpu_memory_usage < 0.75:
+    elif gpu_memory_usage < 0.8:
 
         # increasing_rate = max(1.0, 0.95 / gpu_memory_usage / self.total_emb_dims * 256)
         increasing_rate = 1.1
@@ -359,10 +359,8 @@ class NCFRecommender:
 
                         feature_tensors = None
                         if feature_values_cache is not None and actual_user_batch_size == current_user_batch_size:
-                            start = time.time()
                             feature_values = feature_values_cache[item_batch_idx]
                             feature_tensors = self._feature_values_to_tensors(feature_values, actual_user_batch_size)
-                            print(f'Feature tensors for batch retrieved in {time.time() - start:.2f} seconds')
                             item_batch_idx += 1
 
                         image_tensor = None
