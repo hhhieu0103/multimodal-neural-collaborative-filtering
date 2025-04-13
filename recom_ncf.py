@@ -400,6 +400,39 @@ class NCFRecommender:
 
         return predictions
 
+    def predict_evaluation(self, negative_samples, k):
+        user_batch_size = 128
+        unique_users = list(negative_samples.keys())
+        num_users = len(unique_users)
+        predictions = {}
+
+        i = 0
+        while i < num_users:
+            end_idx = min(i + user_batch_size, num_users)
+            user_batch = unique_users[i:end_idx]
+            items = list(negative_samples.values())[i:end_idx]
+            item_batch_size = len(items[0])
+
+            print(f'Processing {i + 1} of {num_users} users... ({i / num_users:.2%})')
+
+            user_tensor = torch.tensor(user_batch, dtype=torch.long, device=self.device)
+            user_tensor = torch.repeat_interleave(user_tensor, item_batch_size)
+            item_tensor = torch.tensor(np.array(items).flatten(), dtype=torch.long, device=self.device)
+
+            with torch.no_grad():
+                batch_scores = self.model(user_tensor, item_tensor, None, None).reshape(len(user_batch), item_batch_size)
+
+            _extract_top_k_items(user_batch, batch_scores, k, predictions)
+
+            user_batch_size, _ = _adjust_batch_size(user_batch_size, item_batch_size)
+
+            del batch_scores
+            torch.cuda.empty_cache()
+            gc.collect()
+            i = end_idx
+
+        return predictions
+
     # Helper methods for batch_predict_for_users
 
     def _feature_values_to_tensors(self, feature_values, num_users):
