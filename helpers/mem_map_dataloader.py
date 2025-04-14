@@ -4,10 +4,11 @@ import numpy as np
 import torch
 
 class MemMapDataLoader:
-    def __init__(self, file_dir, index_manager, cache_size = 1000, cache_type: CacheType = CacheType.DOUBLE):
+    def __init__(self, file_dir, index_manager, cache_size = 1000, cache_type: CacheType = CacheType.DOUBLE, embed_dim=512):
         self.missing_idx = set()
         self.index_manager = index_manager
         self.file_dir = file_dir
+        self.embed_dim = embed_dim
 
         if cache_type == CacheType.DOUBLE:
             self.cache = DoubleCache(cache_size)
@@ -22,14 +23,14 @@ class MemMapDataLoader:
     def get_tensor(self, item_idx, device='cpu'):
 
         if item_idx in self.missing_idx:
-            return torch.zeros(512, device=device)
+            return torch.zeros(self.embed_dim, device=device)
 
         tensor = self.cache.get(item_idx)
 
         if tensor is not None:
             return tensor
 
-        item_id = self.index_manager.item_id(item_idx)
+        item_id = self.index_manager.get_id('item_id', item_idx)
         tensor = self._get_tensor_from_file(item_id, device)
 
         if tensor is not None:
@@ -37,7 +38,7 @@ class MemMapDataLoader:
             return tensor
 
         self.missing_idx.add(item_idx)
-        return torch.zeros(512, device=device)
+        return torch.zeros(self.embed_dim, device=device)
 
     def _get_tensor_from_file(self, item_id, device):
         tensor_data = self.txn.get(str(item_id).encode())
@@ -47,7 +48,7 @@ class MemMapDataLoader:
         return torch.tensor(tensor_data, device=device)
 
     def get_batch_tensors(self, item_indices, device='cuda'):
-        batch_features = np.zeros((len(item_indices), 512), dtype=np.float32)
+        batch_features = np.zeros((len(item_indices), self.embed_dim), dtype=np.float32)
 
         batch_missing_idx = []
         batch_missing_pos = []
@@ -68,7 +69,7 @@ class MemMapDataLoader:
 
         missing_keys = []
         for item_idx in batch_missing_idx:
-            item_id = self.index_manager.item_id(item_idx)
+            item_id = self.index_manager.get_id('item_id', item_idx)
             missing_keys.append(str(item_id).encode())
 
         env = self._init_env()
