@@ -78,9 +78,9 @@ class NCFTuner:
 
         dataloader_params = {
             'batch_size': params['batch_size'],
-            # 'num_workers': 4,
-            # 'persistent_workers': True,
-            # 'prefetch_factor': 2,
+            'num_workers': 4,
+            'persistent_workers': True,
+            'prefetch_factor': 4,
             'pin_memory': True,
             'collate_fn': collate_fn,
         }
@@ -169,11 +169,6 @@ class NCFTuner:
                     output_dims = self.feature_dims[feature][1]
                     idx = np.random.randint(0, len(output_dims))
                     params['mlp_feature_dims'][feature] = (input_dim, output_dims[idx])
-        
-            # params_hashable = tuple(
-            #     (k, tuple(v)) if isinstance(v, list) else (k, v)
-            #     for k, v in sorted(params.items())
-            # )
 
             params_hashable = []
             for k, v in sorted(params.items()):
