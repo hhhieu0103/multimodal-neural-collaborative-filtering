@@ -1,10 +1,8 @@
-import time
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from ncf import NCF
+from ncf import NCF, ModelType
 import numpy as np
 import pandas as pd
 import gc
@@ -53,9 +51,8 @@ def _adjust_batch_size(current_user_batch_size, current_item_batch_size, min_use
             current_user_batch_size = min_user_batch_size
             current_item_batch_size = min_item_batch_size
 
-    elif gpu_memory_usage < 0.8:
+    elif gpu_memory_usage < 0.85:
 
-        # increasing_rate = max(1.0, 0.95 / gpu_memory_usage / self.total_emb_dims * 256)
         increasing_rate = 1.1
 
         new_user_batch_size = round(current_user_batch_size * increasing_rate)
@@ -106,6 +103,7 @@ class NCFRecommender:
         loss_fn='bce',
         optimizer='sgd',
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        model_type=ModelType.EARLY_FUSION
     ):
         self.feature_values = None
         self.val_losses = None
@@ -138,9 +136,11 @@ class NCFRecommender:
             factors=factors,
             mlp_user_item_dim=mlp_user_item_dim,
             mlp_feature_dims=mlp_feature_dims,
+            image_dim=image_dim,
             num_mlp_layers=num_mlp_layers,
             layers_ratio=layers_ratio,
-            dropout=dropout
+            dropout=dropout,
+            model_type=model_type
         ).to(self.device)
         
     def get_loss_function(self):
@@ -334,8 +334,8 @@ class NCFRecommender:
         current_item_batch_size = item_batch_size
 
         prev_batch_size = (None, None)
-        feature_values_cache = None
-        item_batch_idx = 0
+        is_stable = False
+        feature_values_cache = {}
 
         with torch.no_grad():
             i = 0
@@ -343,34 +343,40 @@ class NCFRecommender:
                 end_idx = min(i + current_user_batch_size, num_users)
                 user_batch = users[i:end_idx]
                 actual_user_batch_size = len(user_batch)
+                is_stable = prev_batch_size[0] == current_user_batch_size and prev_batch_size[1] == current_item_batch_size
 
                 print(f'Processing {i + 1} of {num_users} users... ({i / num_users:.2%})')
 
                 all_scores = torch.zeros((actual_user_batch_size, num_items))
 
-                if self.mlp_feature_dims is not None and feature_values_cache is None and current_user_batch_size == prev_batch_size[0] and current_item_batch_size == prev_batch_size[1]:
+                if self.mlp_feature_dims is not None and len(feature_values_cache) == 0 and is_stable:
                     feature_values_cache = self._build_feature_values_cache(items, current_item_batch_size, actual_user_batch_size)
 
                 j = 0
+                item_batch_idx = 0
                 while j < num_items:
                     try:
                         end_item_idx = min(j + current_item_batch_size, num_items)
                         item_batch = items[j:end_item_idx]
 
                         feature_tensors = None
-                        if feature_values_cache is not None and actual_user_batch_size == current_user_batch_size:
-                            feature_values = feature_values_cache[item_batch_idx]
-                            feature_tensors = self._feature_values_to_tensors(feature_values, actual_user_batch_size)
-                            item_batch_idx += 1
+                        if self.mlp_feature_dims is not None:
+                            if len(feature_values_cache) == 0 or actual_user_batch_size != current_user_batch_size:
+                                feature_values = self._get_batch_feature_values(item_batch, len(user_batch))
+                            else:
+                                feature_values = feature_values_cache[item_batch_idx]
+                            feature_tensors = self._feature_values_to_tensors(feature_values, len(user_batch))
 
                         image_tensor = None
                         if self.image_dim is not None:
                             image_tensor = self.image_dataloader.get_batch_tensors(item_batch)
 
+                        # Process the current batch
                         batch_scores = self.predict(user_batch, item_batch, feature_tensors, image_tensor)
 
                         all_scores[:, j:end_item_idx] = batch_scores.cpu()
 
+                        item_batch_idx += 1
                         j = end_item_idx
 
                     except RuntimeError as e:
@@ -385,8 +391,7 @@ class NCFRecommender:
 
                 _extract_top_k_items(user_batch, all_scores, k, predictions)
 
-                item_batch_idx = 0
-                if prev_batch_size[0] != current_user_batch_size or prev_batch_size[1] != current_item_batch_size:
+                if not is_stable:
                     prev_batch_size = current_user_batch_size, current_item_batch_size
                     current_user_batch_size, current_item_batch_size = _adjust_batch_size(current_user_batch_size, current_item_batch_size)
 
@@ -395,39 +400,6 @@ class NCFRecommender:
                 gc.collect()
 
                 i = end_idx
-
-        return predictions
-
-    def predict_evaluation(self, negative_samples, k):
-        user_batch_size = 128
-        unique_users = list(negative_samples.keys())
-        num_users = len(unique_users)
-        predictions = {}
-
-        i = 0
-        while i < num_users:
-            end_idx = min(i + user_batch_size, num_users)
-            user_batch = unique_users[i:end_idx]
-            items = list(negative_samples.values())[i:end_idx]
-            item_batch_size = len(items[0])
-
-            print(f'Processing {i + 1} of {num_users} users... ({i / num_users:.2%})')
-
-            user_tensor = torch.tensor(user_batch, dtype=torch.long, device=self.device)
-            user_tensor = torch.repeat_interleave(user_tensor, item_batch_size)
-            item_tensor = torch.tensor(np.array(items).flatten(), dtype=torch.long, device=self.device)
-
-            with torch.no_grad():
-                batch_scores = self.model(user_tensor, item_tensor, None, None).reshape(len(user_batch), item_batch_size)
-
-            _extract_top_k_items(user_batch, batch_scores, k, predictions)
-
-            user_batch_size, _ = _adjust_batch_size(user_batch_size, item_batch_size)
-
-            del batch_scores
-            torch.cuda.empty_cache()
-            gc.collect()
-            i = end_idx
 
         return predictions
 
@@ -444,7 +416,6 @@ class NCFRecommender:
                 offsets_tensor = torch.tensor(offsets, dtype=torch.long, device=self.device)
                 feature_tensors[feature] = (indices_tensor, offsets_tensor)
         return feature_tensors
-
 
     def _build_feature_values_cache(self, items, item_batch_size, num_users):
         num_batches = math.ceil(len(items) / item_batch_size)
