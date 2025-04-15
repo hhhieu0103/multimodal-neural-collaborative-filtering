@@ -5,9 +5,9 @@ from torch.utils.data import DataLoader
 from ncf import NCF, ModelType
 import numpy as np
 import pandas as pd
-import gc
 import math
 from helpers.mem_map_dataloader import MemMapDataLoader
+import psutil
 
 class BPRLoss(nn.Module):
     def __init__(self):
@@ -17,26 +17,14 @@ class BPRLoss(nn.Module):
         loss = -torch.mean(torch.log(torch.sigmoid(positive_predictions - negative_predictions)))
         return loss
 
-def _get_gpu_memory_usage():
-    """Get current GPU memory usage"""
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # GB
-
-        # Estimate total GPU memory (adjust based on your GPU)
-        total_gpu_memory = 8.0  # RTX 4060 Mobile has around 8GB
-
-        gpu_memory_usage = reserved / total_gpu_memory
-        return gpu_memory_usage
-    return 0
-
 def _adjust_batch_size(current_user_batch_size, current_item_batch_size, min_user_batch_size=64, min_item_batch_size=128):
-    """Adjust item batch size based on current GPU memory usage"""
-    gpu_memory_usage = _get_gpu_memory_usage()
+    """Adjust item batch size based on current memory usage"""
 
-    if gpu_memory_usage >= 0.95:
+    memory_usage = psutil.virtual_memory().percent
 
-        print('Memory usage:', gpu_memory_usage)
+    if memory_usage >= 95.0:
+
+        print('Memory usage:', memory_usage)
         if current_item_batch_size > min_item_batch_size:
             new_item_batch_size = max(min_item_batch_size, current_item_batch_size // 2)
             if new_item_batch_size != current_item_batch_size:
@@ -51,14 +39,14 @@ def _adjust_batch_size(current_user_batch_size, current_item_batch_size, min_use
             current_user_batch_size = min_user_batch_size
             current_item_batch_size = min_item_batch_size
 
-    elif gpu_memory_usage < 0.85:
+    elif memory_usage < 85.0:
 
         increasing_rate = 1.1
 
         new_user_batch_size = round(current_user_batch_size * increasing_rate)
         new_item_batch_size = round(current_item_batch_size * increasing_rate)
 
-        print('Memory usage:', gpu_memory_usage ,'. Increasing batch size with increasing rate of', increasing_rate)
+        print('Memory usage:', memory_usage ,'. Increasing batch size with increasing rate of', increasing_rate)
 
         if new_user_batch_size != current_user_batch_size:
             print('Increased user batch size from', current_user_batch_size, 'to', new_user_batch_size)
@@ -102,7 +90,6 @@ class NCFRecommender:
         weight_decay=0.0,
         loss_fn='bce',
         optimizer='sgd',
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         model_type=ModelType.EARLY_FUSION
     ):
         self.feature_values = None
@@ -110,7 +97,6 @@ class NCFRecommender:
         self.train_losses = None
         self.learning_rate = learning_rate
         self.epochs = epochs
-        self.device = device
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.weight_decay = weight_decay
@@ -141,7 +127,7 @@ class NCFRecommender:
             layers_ratio=layers_ratio,
             dropout=dropout,
             model_type=model_type
-        ).to(self.device)
+        )
         
     def get_loss_function(self):
         if self.loss_fn == 'bce':
@@ -246,24 +232,15 @@ class NCFRecommender:
     def _move_data_to_device(self, data_batch):
         users, items, ratings, features, images = data_batch
 
-        users = users.to(self.device)
-        items = items.to(self.device)
-        ratings = ratings.to(self.device)
-
         if self.mlp_feature_dims is not None and len(features) > 0:
             for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
                 if input_dim == 1:
-                    features[feature] = features[feature].to(self.device)
+                    features[feature] = features[feature]
                 else:
                     indices, offsets = features[feature]
-                    features[feature] = (indices.to(self.device), offsets.to(self.device))
+                    features[feature] = (indices, offsets)
         else:
             features = None
-
-        if self.image_dim is not None and len(images) > 0:
-            images = images.to(self.device)
-        else:
-            images = None
 
         return users, items, ratings, features, images
 
@@ -279,8 +256,8 @@ class NCFRecommender:
         num_users = len(users)
         num_items = len(items)
 
-        users_tensor = torch.tensor(users, dtype=torch.long, device=self.device)
-        items_tensor = torch.tensor(items, dtype=torch.long, device=self.device)
+        users_tensor = torch.tensor(users, dtype=torch.long)
+        items_tensor = torch.tensor(items, dtype=torch.long)
 
         users_tensor = users_tensor.unsqueeze(1).expand(-1, num_items).reshape(-1)
         items_tensor = items_tensor.unsqueeze(0).expand(num_users, -1).reshape(-1)
@@ -380,24 +357,14 @@ class NCFRecommender:
                         j = end_item_idx
 
                     except RuntimeError as e:
-                        if "CUDA out of memory" in str(e):
-                            current_user_batch_size = max(128, current_user_batch_size // 4)
-                            current_item_batch_size = max(128, current_item_batch_size // 4)
-                            torch.cuda.empty_cache()
-                            gc.collect()
-                            continue
-                        else:
-                            raise e
+                        current_user_batch_size = max(128, current_user_batch_size // 4)
+                        current_item_batch_size = max(128, current_item_batch_size // 4)
 
                 _extract_top_k_items(user_batch, all_scores, k, predictions)
 
                 if not is_stable:
                     prev_batch_size = current_user_batch_size, current_item_batch_size
                     current_user_batch_size, current_item_batch_size = _adjust_batch_size(current_user_batch_size, current_item_batch_size)
-
-                del all_scores
-                torch.cuda.empty_cache()
-                gc.collect()
 
                 i = end_idx
 
@@ -409,11 +376,11 @@ class NCFRecommender:
         feature_tensors = {}
         for feature, (input_dim, output_dim) in self.mlp_feature_dims.items():
             if input_dim == 1:
-                feature_tensors[feature] = torch.tensor(feature_values[feature], dtype=torch.float32, device=self.device).repeat(num_users)
+                feature_tensors[feature] = torch.tensor(feature_values[feature], dtype=torch.float32).repeat(num_users)
             else:
                 indices, offsets = feature_values[feature]
-                indices_tensor = torch.tensor(indices, dtype=torch.long, device=self.device).repeat(num_users)
-                offsets_tensor = torch.tensor(offsets, dtype=torch.long, device=self.device)
+                indices_tensor = torch.tensor(indices, dtype=torch.long).repeat(num_users)
+                offsets_tensor = torch.tensor(offsets, dtype=torch.long)
                 feature_tensors[feature] = (indices_tensor, offsets_tensor)
         return feature_tensors
 

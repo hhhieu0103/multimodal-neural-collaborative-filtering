@@ -1,8 +1,6 @@
 import numpy as np
 import pandas as pd
-import torch
 from recom_ncf import NCFRecommender
-import gc
 
 class Evaluation:
     def __init__(
@@ -39,9 +37,6 @@ class Evaluation:
                 user_batch_size=user_batch_size,
                 item_batch_size=item_batch_size
             )
-
-            gc.collect()
-            torch.cuda.empty_cache()
 
         if k > self.max_k:
             print(f"Warning: k={k} exceeds max_k={self.max_k}. Using k={self.max_k} instead.")
@@ -101,7 +96,5 @@ class Evaluation:
             f'NDCG@{k}': ndcg,
             f'Recall@{k}': recall
         }
-
-        gc.collect()
 
         return self.metrics

@@ -20,10 +20,10 @@ class MemMapDataLoader:
         self.env = None
         self.txn = None
 
-    def get_tensor(self, item_idx, device='cpu'):
+    def get_tensor(self, item_idx):
 
         if item_idx in self.missing_idx:
-            return torch.zeros(self.embed_dim, device=device)
+            return torch.zeros(self.embed_dim)
 
         tensor = self.cache.get(item_idx)
 
@@ -31,23 +31,23 @@ class MemMapDataLoader:
             return tensor
 
         item_id = self.index_manager.get_id('item_id', item_idx)
-        tensor = self._get_tensor_from_file(item_id, device)
+        tensor = self._get_tensor_from_file(item_id)
 
         if tensor is not None:
             self.cache.insert(item_idx, tensor)
             return tensor
 
         self.missing_idx.add(item_idx)
-        return torch.zeros(self.embed_dim, device=device)
+        return torch.zeros(self.embed_dim)
 
-    def _get_tensor_from_file(self, item_id, device):
+    def _get_tensor_from_file(self, item_id):
         tensor_data = self.txn.get(str(item_id).encode())
         if tensor_data is None:
             return None
         tensor_data = np.frombuffer(tensor_data, dtype=np.float32)
-        return torch.tensor(tensor_data, device=device)
+        return torch.tensor(tensor_data)
 
-    def get_batch_tensors(self, item_indices, device='cuda'):
+    def get_batch_tensors(self, item_indices):
         batch_features = np.zeros((len(item_indices), self.embed_dim), dtype=np.float32)
 
         batch_missing_idx = []
@@ -65,7 +65,7 @@ class MemMapDataLoader:
                 batch_missing_pos.append(i)
 
         if len(batch_missing_idx) == 0:
-            return torch.tensor(batch_features, device=device)
+            return torch.tensor(batch_features)
 
         missing_keys = []
         for item_idx in batch_missing_idx:
@@ -84,7 +84,7 @@ class MemMapDataLoader:
                 else:
                     self.missing_idx.add(item_idx)
 
-        return torch.tensor(batch_features, device=device)
+        return torch.tensor(batch_features)
 
     def open_lmdb(self):
         self.env = self._init_env()
