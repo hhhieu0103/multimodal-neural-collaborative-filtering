@@ -24,8 +24,8 @@ class NCFDataset(Dataset):
         items = df_interaction[item_col].values
         ratings = df_interaction[rating_col].values
 
-        self.users = torch.tensor(users, dtype=torch.long)
-        self.items = torch.tensor(items, dtype=torch.long)
+        self.users = torch.tensor(users, dtype=torch.int)
+        self.items = torch.tensor(items, dtype=torch.int)
         self.ratings = torch.tensor(ratings, dtype=torch.float32)
 
         self.feature_dims = feature_dims
@@ -49,7 +49,7 @@ class NCFDataset(Dataset):
                 if input_dim == 1:
                     features_idx[feature] = torch.tensor(feature_value, dtype=torch.float32)
                 else:
-                    features_idx[feature] = torch.tensor(feature_value, dtype=torch.long)
+                    features_idx[feature] = torch.tensor(feature_value, dtype=torch.int)
 
         image_tensor = None
         if self.image_dataloader is not None:

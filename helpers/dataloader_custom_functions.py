@@ -22,7 +22,7 @@ def collate_fn(batch):
                 features[name] = torch.stack(feature_tensors)
             else:
                 indices = torch.cat(tuple(feature_tensors))
-                lengths = torch.tensor([len(indices) for indices in feature_tensors], dtype=torch.long)
+                lengths = torch.tensor([len(indices) for indices in feature_tensors], dtype=torch.short)
                 offsets = torch.zeros(lengths.size(0), dtype=torch.long)
                 torch.cumsum(lengths[:-1], dim=0, out=offsets[1:])
                 features[name] = (indices, offsets)
