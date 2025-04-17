@@ -82,7 +82,7 @@ class NCFTuner:
             'persistent_workers': True,
             'prefetch_factor': 4,
             'pin_memory': True,
-            'pin_memory_device': 'gpu',
+            'pin_memory_device': 'cuda',
             'collate_fn': collate_fn,
         }
         
