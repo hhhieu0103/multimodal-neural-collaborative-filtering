@@ -10,9 +10,31 @@ import matplotlib.pyplot as plt
 from dataset import NCFDataset
 from recom_ncf import NCFRecommender
 from evaluation import Evaluation
+from ncf import ModelType
 
 from helpers.mem_map_dataloader import MemMapDataLoader
 from helpers.dataloader_custom_functions import collate_fn, worker_init_fn
+
+
+def _dict_to_hashable(dictionary):
+    hashable = []
+    for k, v in sorted(dictionary.items()):
+        if isinstance(v, list):
+            hashable.append((k, tuple(v)))
+        elif isinstance(v, dict):
+            hashable.append((k, tuple(v.items())))
+        else:
+            hashable.append((k, v))
+    return tuple(hashable)
+
+
+def _extract_configs(results):
+    """Extract parameter configurations from results"""
+    configs = set()
+    for result in results:
+        config = _dict_to_hashable(result['params'])
+        configs.add(config)
+    return configs
 
 class NCFTuner:
     def __init__(
@@ -26,7 +48,8 @@ class NCFTuner:
         df_features=None,
         k_values=[50, 20, 10],
         results_dir='tuning_results',
-        image_dataloader: MemMapDataLoader = None
+        image_dataloader: MemMapDataLoader = None,
+        model_type: ModelType = ModelType.EARLY_FUSION
     ):
         self.train_data = train_data
         self.val_data = val_data
@@ -38,6 +61,7 @@ class NCFTuner:
         self.df_features = df_features
         self.feature_dims = feature_dims
         self.image_dataloader = image_dataloader
+        self.model_type = model_type
         
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
@@ -97,10 +121,14 @@ class NCFTuner:
             'learning_rate': params['learning_rate'],
             'epochs': params['epochs'],
             'optimizer': params['optimizer'],
+            'dropout': params['dropout'],
+            'weight_decay': params['weight_decay'],
+            'loss_fn': params['loss_fn'],
             'mlp_feature_dims': params.get('mlp_feature_dims', None),
             'image_dataloader': self.image_dataloader,
             'image_dim': params.get('image_dim', None),
             'df_features': self.df_features,
+            'model_type': self.model_type,
         }
 
         # Create model with the specified parameters
@@ -126,14 +154,16 @@ class NCFTuner:
             eval_results[f'k={k}'] = metrics
             
         print(eval_results)
-        
+        for key, value in vars(model).items():
+            print(f"{key} = {value}")
+
         # Save the training losses
         eval_results['train_loss'] = model.train_losses
         eval_results['val_loss'] = model.val_losses
         
         return eval_results
 
-    def perform_random_search(self, num_trials=10, prevent_duplicates=True):
+    def perform_random_search(self, num_trials=10, prevent_duplicates=True, result_file=None):
         """
         Perform random search with the specified number of trials
         
@@ -143,7 +173,10 @@ class NCFTuner:
         """
         results = []
         tried_configs = set()  # Keep track of configs we've already tried
-        
+        if result_file:
+            results = self._load_results(result_file)
+            tried_configs = set(_extract_configs(results))
+
         trial = 0
         max_attempts = num_trials * 10  # Set a maximum to prevent infinite loops
         attempts = 0
@@ -162,7 +195,7 @@ class NCFTuner:
 
             if self.feature_dims is not None:
                 params['mlp_feature_dims'] = {}
-                num_selected_features = np.random.randint(1, len(self.feature_dims))
+                num_selected_features = np.random.randint(1, len(self.feature_dims) + 1)
                 selected_features = np.random.choice(list(self.feature_dims.keys()), num_selected_features, replace=False)
 
                 for feature in selected_features:
@@ -171,15 +204,7 @@ class NCFTuner:
                     idx = np.random.randint(0, len(output_dims))
                     params['mlp_feature_dims'][feature] = (input_dim, output_dims[idx])
 
-            params_hashable = []
-            for k, v in sorted(params.items()):
-                if isinstance(v, list):
-                    params_hashable.append((k, tuple(v)))
-                elif isinstance(v, dict):
-                    params_hashable.append((k, tuple(v.items())))
-                else:
-                    params_hashable.append((k, v))
-            params_hashable = tuple(params_hashable)
+            params_hashable = _dict_to_hashable(params)
             
             if prevent_duplicates and params_hashable in tried_configs:
                 continue
@@ -210,7 +235,7 @@ class NCFTuner:
         result_path = self._save_results(results, f"random_search_final_{timestamp}")
         
         return results, result_path
-    
+
     def _save_results(self, results, filename):
         """Save results to a file"""
         filepath = os.path.join(self.results_dir, f"{filename}.json")
