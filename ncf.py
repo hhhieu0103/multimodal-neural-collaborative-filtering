@@ -133,6 +133,7 @@ class MLP(nn.Module):
 class MLPMetadata(nn.Module):
     def __init__(
             self,
+            num_users,
             num_items,
             feature_dims,
             embedding_dim=32,
@@ -144,9 +145,11 @@ class MLPMetadata(nn.Module):
     ):
         super(MLPMetadata, self).__init__()
 
+        self.user_embedding = nn.Embedding(num_users, embedding_dim)
         self.item_embedding = nn.Embedding(num_items, embedding_dim)
+        nn.init.normal_(self.user_embedding.weight, mean=gaussian_mean, std=gaussian_std)
         nn.init.normal_(self.item_embedding.weight, mean=gaussian_mean, std=gaussian_std)
-        mlp_input_dim = embedding_dim
+        mlp_input_dim = embedding_dim * 2
 
         self.projection_layers = nn.ModuleDict()
         for feature, (input_dim, output_dim) in feature_dims.items():
@@ -164,8 +167,10 @@ class MLPMetadata(nn.Module):
             self.layers.append(nn.Linear(mlp_input_dim, mlp_output_dim))
             mlp_input_dim = mlp_output_dim
 
-    def forward(self, item, features):
-        vector = self.item_embedding(item)
+    def forward(self, user, item, features):
+        user_embed = self.user_embedding(user)
+        item_embed = self.item_embedding(item)
+        vector = torch.cat([user_embed, item_embed], dim=-1)
 
         for feature, layer in self.projection_layers.items():
             if isinstance(layer, nn.Linear):
@@ -317,6 +322,7 @@ class NCF(nn.Module):
             self.mlp_module['mlp_metadata'] = None
             if mlp_feature_dims is not None:
                 mlp_metadata = MLPMetadata(
+                    num_users=num_users,
                     num_items=num_items,
                     embedding_dim=mlp_user_item_dim,
                     feature_dims=mlp_feature_dims,
@@ -357,7 +363,7 @@ class NCF(nn.Module):
             elif mlp_metadata is not None and features is None:
                 raise ValueError('MLP feature data is missing')
             elif mlp_metadata is not None and features is not None:
-                mlp_metadata_vector = self.mlp_module['mlp_metadata'](item, features)
+                mlp_metadata_vector = self.mlp_module['mlp_metadata'](user, item, features)
                 mlp_vector = torch.cat([mlp_vector, mlp_metadata_vector], dim=-1)
 
             mlp_image = self.mlp_module['mlp_image']
