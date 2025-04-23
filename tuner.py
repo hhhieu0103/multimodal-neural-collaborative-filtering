@@ -154,8 +154,6 @@ class NCFTuner:
             eval_results[f'k={k}'] = metrics
             
         print(eval_results)
-        for key, value in vars(model).items():
-            print(f"{key} = {value}")
 
         # Save the training losses
         eval_results['train_loss'] = model.train_losses
