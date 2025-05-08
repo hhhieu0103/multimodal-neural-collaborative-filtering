@@ -41,6 +41,8 @@ class MemMapDataLoader:
         return torch.zeros(self.embed_dim, device=device)
 
     def _get_tensor_from_file(self, item_id, device):
+        if self.env is None:
+            self.open_lmdb()
         tensor_data = self.txn.get(str(item_id).encode())
         if tensor_data is None:
             return None

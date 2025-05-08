@@ -15,7 +15,7 @@ class MLPFull(nn.Module):
             embedding_dim=32,
             feature_dims=None,
             image_dim=None,
-            frame_dim=None,
+            audio_dim=None,
             dropout=0.0,
             layers_ratio=2,
             num_layers=4,
@@ -45,12 +45,11 @@ class MLPFull(nn.Module):
         else:
             self.image_layer = None
 
-        if frame_dim is not None:
-            input_dim = 512 * 8 # 8 frames per video
-            self.frame_layer = nn.Linear(input_dim, frame_dim)
-            mlp_input_dim += input_dim
+        if audio_dim is not None:
+            self.audio_layer = nn.Linear(128, audio_dim)
+            mlp_input_dim += audio_dim
         else:
-            self.frame_layer = None
+            self.audio_layer = None
 
         self.dropout = dropout
         self.layers = nn.ModuleList()
@@ -60,7 +59,7 @@ class MLPFull(nn.Module):
             self.layers.append(nn.Linear(mlp_input_dim, mlp_output_dim))
             mlp_input_dim = mlp_output_dim
 
-    def forward(self, user, item, features, image):
+    def forward(self, user, item, features, image, audio):
         user_embed = self.user_embedding(user)
         item_embed = self.item_embedding(item)
         vector = torch.cat([user_embed, item_embed], dim=-1)
@@ -77,9 +76,9 @@ class MLPFull(nn.Module):
             image_embed = self.image_layer(image)
             vector = torch.cat([vector, image_embed], dim=-1)
 
-        if self.frame_layer is not None:
-            frame_embed = self.frame_layer(image)
-            vector = torch.cat([vector, frame_embed], dim=-1)
+        if self.audio_layer is not None:
+            audio_embed = self.audio_layer(audio)
+            vector = torch.cat([vector, audio_embed], dim=-1)
 
         for layer in self.layers:
             vector = F.relu(layer(vector))
@@ -206,6 +205,7 @@ class MLPImage(nn.Module):
         nn.init.normal_(self.item_embedding.weight, mean=gaussian_mean, std=gaussian_std)
         mlp_input_dim = embedding_dim
 
+        self.image_bn = nn.BatchNorm1d(512)
         self.image_layer = nn.Linear(512, image_dim)
         mlp_input_dim += image_dim
 
@@ -219,10 +219,10 @@ class MLPImage(nn.Module):
 
     def forward(self, item, image):
         item_embed = self.item_embedding(item)
-        vector = item_embed
 
-        image_embed = self.image_layer(image)
-        vector = torch.cat([vector, image_embed], dim=-1)
+        image_feature = self.image_bn(image)
+        image_embed = self.image_layer(image_feature)
+        vector = torch.cat([item_embed, image_embed], dim=-1)
 
         for layer in self.layers:
             vector = F.relu(layer(vector))
@@ -231,6 +231,53 @@ class MLPImage(nn.Module):
 
         return vector
 
+
+class MLPAudio(nn.Module):
+    def __init__(
+            self,
+            num_users,
+            num_items,
+            audio_dim,
+            embedding_dim=32,
+            dropout=0.0,
+            layers_ratio=2,
+            num_layers=4,
+            gaussian_mean=0,
+            gaussian_std=0.01
+    ):
+        super(MLPAudio, self).__init__()
+
+        self.user_embedding = nn.Embedding(num_users, embedding_dim)
+        self.item_embedding = nn.Embedding(num_items, embedding_dim)
+        nn.init.normal_(self.user_embedding.weight, mean=gaussian_mean, std=gaussian_std)
+        nn.init.normal_(self.item_embedding.weight, mean=gaussian_mean, std=gaussian_std)
+        mlp_input_dim = embedding_dim * 2
+
+        self.audio_layer = nn.Linear(128, audio_dim)
+        mlp_input_dim += audio_dim
+
+        self.dropout = dropout
+        self.layers = nn.ModuleList()
+
+        for i in range(0, num_layers):
+            mlp_output_dim = int(mlp_input_dim / layers_ratio)
+            self.layers.append(nn.Linear(mlp_input_dim, mlp_output_dim))
+            mlp_input_dim = mlp_output_dim
+
+    def forward(self, user, item, audio):
+        user_embed = self.user_embedding(user)
+        item_embed = self.item_embedding(item)
+        vector = torch.cat([user_embed, item_embed], dim=-1)
+
+        audio_embed = self.audio_layer(audio)
+        vector = torch.cat([vector, audio_embed], dim=-1)
+
+        for layer in self.layers:
+            vector = F.relu(layer(vector))
+            if self.dropout > 0:
+                vector = F.dropout(vector, p=self.dropout, training=self.training)
+
+        return vector
 
 class GMF(nn.Module):
     def __init__(
@@ -274,7 +321,7 @@ class NCF(nn.Module):
         mlp_user_item_dim=32,
         mlp_feature_dims=None, # Dictionary with keys are features, values are tuples of (input, output),
         image_dim=None,
-        frame_dim=None,
+        audio_dim=None,
         num_mlp_layers=4,
         layers_ratio=2,
         dropout=0,
@@ -293,7 +340,7 @@ class NCF(nn.Module):
             embedding_dim=mlp_user_item_dim,
             feature_dims=mlp_feature_dims,
             image_dim=image_dim,
-            frame_dim=frame_dim,
+            audio_dim=audio_dim,
             dropout=dropout,
             layers_ratio=layers_ratio,
             num_layers=num_mlp_layers,
@@ -303,8 +350,8 @@ class NCF(nn.Module):
         mlp_output_dim = self.mlp_module.layers[-1].out_features
 
         if model_type == ModelType.LATE_FUSION:
-            if mlp_feature_dims is None and image_dim is None:
-                raise ValueError('MLP feature dims or image dim must be specified for late fusion model')
+            if mlp_feature_dims is None and image_dim is None and audio_dim is None:
+                raise ValueError('MLP feature dims or image dim or audio dim must be specified for late fusion model')
 
             mlp = MLP(
                 num_users=num_users,
@@ -343,17 +390,31 @@ class NCF(nn.Module):
                     image_dim=image_dim,
                     dropout=dropout,
                     layers_ratio=layers_ratio,
-                    num_layers=num_mlp_layers,
+                    num_layers=num_mlp_layers
                 )
                 self.mlp_module['mlp_image'] = mlp_image
                 mlp_output_dim += mlp_image.layers[-1].out_features
 
+            self.mlp_module['mlp_audio'] = None
+            if audio_dim is not None:
+                mlp_audio = MLPAudio(
+                    num_users=num_users,
+                    num_items=num_items,
+                    audio_dim=audio_dim,
+                    embedding_dim=mlp_user_item_dim,
+                    dropout=dropout,
+                    layers_ratio=layers_ratio,
+                    num_layers=num_mlp_layers,
+                )
+                self.mlp_module['mlp_audio'] = mlp_audio
+                mlp_output_dim += mlp_audio.layers[-1].out_features
+
         self.prediction = nn.Linear(factors + mlp_output_dim, 1)
 
-    def forward(self, user, item, features, images):
+    def forward(self, user, item, features, images, audio):
         gmf_vector = self.gmf_module(user, item)
         if self.model_type == ModelType.EARLY_FUSION:
-            mlp_vector = self.mlp_module(user, item, features, images)
+            mlp_vector = self.mlp_module(user, item, features, images, audio)
         else:
             mlp_vector = self.mlp_module['mlp'](user, item)
 
@@ -374,6 +435,15 @@ class NCF(nn.Module):
             elif mlp_image is not None and images is not None:
                 mlp_image_vector = self.mlp_module['mlp_image'](item, images)
                 mlp_vector = torch.cat([mlp_vector, mlp_image_vector], dim=-1)
+
+            mlp_audio = self.mlp_module['mlp_audio']
+            if mlp_audio is None and audio is not None:
+                raise ValueError('MLP audio dim is missing')
+            elif mlp_audio is not None and audio is None:
+                raise ValueError('MLP audio data is missing')
+            elif mlp_audio is not None and audio is not None:
+                mlp_audio_vector = self.mlp_module['mlp_audio'](user, item, audio)
+                mlp_vector = torch.cat([mlp_vector, mlp_audio_vector], dim=-1)
 
         vector = torch.cat([gmf_vector, mlp_vector], dim=-1)
         logit = self.prediction(vector)

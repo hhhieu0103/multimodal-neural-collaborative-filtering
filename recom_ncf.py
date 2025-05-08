@@ -10,14 +10,6 @@ import pandas as pd
 import gc
 from helpers.mem_map_dataloader import MemMapDataLoader
 
-class BPRLoss(nn.Module):
-    def __init__(self):
-        super(BPRLoss, self).__init__()
-        
-    def forward(self, positive_predictions, negative_predictions):
-        loss = -torch.mean(torch.log(torch.sigmoid(positive_predictions - negative_predictions)))
-        return loss
-
 def _get_gpu_memory_usage():
     """Get current GPU memory usage"""
     if torch.cuda.is_available():
@@ -85,7 +77,9 @@ class NCFRecommender:
         mlp_user_item_dim=32,
         mlp_feature_dims=None, # Dictionary where keys are features, values are tuples (input, output)
         image_dim=None,
+        audio_dim=None,
         image_dataloader: MemMapDataLoader=None,
+        audio_dataloader: MemMapDataLoader=None,
         df_features: pd.DataFrame=None,
         num_mlp_layers=4,
         layers_ratio=2,
@@ -96,7 +90,8 @@ class NCFRecommender:
         loss_fn='bce',
         optimizer='sgd',
         device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        model_type=ModelType.EARLY_FUSION
+        model_type=ModelType.EARLY_FUSION,
+        early_stopping=True,
     ):
         self.feature_values = None
         self.val_losses = None
@@ -110,7 +105,10 @@ class NCFRecommender:
         self.early_stopping_patience = 5
         self.mlp_feature_dims = mlp_feature_dims
         self.image_dim = image_dim
+        self.audio_dim = audio_dim
         self.image_dataloader = image_dataloader
+        self.audio_dataloader = audio_dataloader
+        self.early_stopping = early_stopping
 
         if self.mlp_feature_dims is not None:
             if df_features is None:
@@ -130,6 +128,7 @@ class NCFRecommender:
             mlp_user_item_dim=mlp_user_item_dim,
             mlp_feature_dims=mlp_feature_dims,
             image_dim=image_dim,
+            audio_dim=audio_dim,
             num_mlp_layers=num_mlp_layers,
             layers_ratio=layers_ratio,
             dropout=dropout,
@@ -141,8 +140,6 @@ class NCFRecommender:
             return nn.BCELoss()
         elif self.loss_fn == 'mse':
             return nn.MSELoss()
-        elif self.loss_fn == 'bpr':
-            return BPRLoss()
         else:
             raise ValueError(f'Unsupported loss function: {self.loss_fn}')
     
@@ -184,8 +181,8 @@ class NCFRecommender:
                 best_model_state = self.model.state_dict().copy()
             else:
                 patience_counter += 1
-                
-            if patience_counter >= self.early_stopping_patience:
+
+            if self.early_stopping and patience_counter >= self.early_stopping_patience:
                 print(f'Early stopping triggered after {epoch+1} epochs')
                 break
             
@@ -204,11 +201,11 @@ class NCFRecommender:
         num_batches = 0
 
         for data_batch in train_data:
-            users, items, ratings, features, images = self._move_data_to_device(data_batch)
+            users, items, ratings, features, images, audio = self._move_data_to_device(data_batch)
 
             optimizer.zero_grad()
 
-            predictions = self.model(users, items, features, images)
+            predictions = self.model(users, items, features, images, audio)
             loss = loss_fn(predictions, ratings)
 
             loss.backward()
@@ -226,9 +223,9 @@ class NCFRecommender:
 
         with torch.no_grad():
             for data_batch in val_data:
-                users, items, ratings, features, images = self._move_data_to_device(data_batch)
+                users, items, ratings, features, images, audio = self._move_data_to_device(data_batch)
                 
-                predictions = self.model(users, items, features, images)
+                predictions = self.model(users, items, features, images, audio)
                 loss = loss_fn(predictions, ratings)
                 
                 total_loss += loss.item()
@@ -237,7 +234,7 @@ class NCFRecommender:
         return total_loss / num_batches
 
     def _move_data_to_device(self, data_batch):
-        users, items, ratings, features, images = data_batch
+        users, items, ratings, features, images, audio = data_batch
 
         users = users.to(self.device)
         items = items.to(self.device)
@@ -253,19 +250,25 @@ class NCFRecommender:
         else:
             features = None
 
-        if self.image_dim is not None and len(images) > 0:
+        if self.image_dim is not None and images is not None and len(images) > 0:
             images = images.to(self.device)
         else:
             images = None
 
-        return users, items, ratings, features, images
+        if self.audio_dim is not None and audio is not None and len(audio) > 0:
+            audio = audio.to(self.device)
+        else:
+            audio = None
+
+        return users, items, ratings, features, images, audio
 
     def predict(
             self,
             users: np.ndarray,
             items: np.ndarray,
             feature_tensors: dict | None = None,
-            image_tensors = None
+            image_tensors = None,
+            audio_tensors = None
     ):
         self.model.eval()
 
@@ -281,8 +284,11 @@ class NCFRecommender:
         if image_tensors is not None:
             image_tensors = image_tensors.repeat(num_users, 1)
 
+        if audio_tensors is not None:
+            audio_tensors = audio_tensors.repeat(num_users, 1)
+
         with torch.no_grad():
-            predictions = self.model(users_tensor, items_tensor, feature_tensors, image_tensors)
+            predictions = self.model(users_tensor, items_tensor, feature_tensors, image_tensors, audio_tensors)
 
         return predictions.view(num_users, num_items)
 
@@ -354,8 +360,12 @@ class NCFRecommender:
                         if self.image_dim is not None:
                             image_tensor = self.image_dataloader.get_batch_tensors(item_batch)
 
+                        audio_tensors = None
+                        if self.audio_dim is not None:
+                            audio_tensors = self.audio_dataloader.get_batch_tensors(item_batch)
+
                         # Process the current batch
-                        batch_scores = self.predict(user_batch, item_batch, feature_tensors, image_tensor)
+                        batch_scores = self.predict(user_batch, item_batch, feature_tensors, image_tensor, audio_tensors)
 
                         all_scores[:, j:end_item_idx] = batch_scores.cpu()
 

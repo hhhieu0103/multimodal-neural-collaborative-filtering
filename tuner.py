@@ -22,7 +22,7 @@ def _dict_to_hashable(dictionary):
         if isinstance(v, list):
             hashable.append((k, tuple(v)))
         elif isinstance(v, dict):
-            hashable.append((k, tuple(v.items())))
+            hashable.append((k, _dict_to_hashable(v)))
         else:
             hashable.append((k, v))
     return tuple(hashable)
@@ -49,6 +49,7 @@ class NCFTuner:
         k_values=[50, 20, 10],
         results_dir='tuning_results',
         image_dataloader: MemMapDataLoader = None,
+        audio_dataloader: MemMapDataLoader = None,
         model_type: ModelType = ModelType.EARLY_FUSION
     ):
         self.train_data = train_data
@@ -61,6 +62,7 @@ class NCFTuner:
         self.df_features = df_features
         self.feature_dims = feature_dims
         self.image_dataloader = image_dataloader
+        self.audio_dataloader = audio_dataloader
         self.model_type = model_type
         
         if not os.path.exists(results_dir):
@@ -93,6 +95,7 @@ class NCFTuner:
         dataset_params = {
             'df_features': self.df_features,
             'image_dataloader': self.image_dataloader,
+            'audio_dataloader': self.audio_dataloader,
             'feature_dims': params.get('mlp_feature_dims', None),
         }
 
@@ -109,7 +112,10 @@ class NCFTuner:
             'pin_memory_device': 'cuda',
             'collate_fn': collate_fn,
         }
-        
+
+        if self.image_dataloader is not None or self.audio_dataloader is not None:
+            dataloader_params['worker_init_fn'] = worker_init_fn
+
         train_loader = DataLoader(train_dataset, shuffle=True, **dataloader_params)
         val_loader = DataLoader(val_dataset, shuffle=False, **dataloader_params)
 
@@ -126,7 +132,9 @@ class NCFTuner:
             'loss_fn': params['loss_fn'],
             'mlp_feature_dims': params.get('mlp_feature_dims', None),
             'image_dataloader': self.image_dataloader,
+            'audio_dataloader': self.audio_dataloader,
             'image_dim': params.get('image_dim', None),
+            'audio_dim': params.get('audio_dim', None),
             'df_features': self.df_features,
             'model_type': self.model_type,
         }
@@ -144,9 +152,6 @@ class NCFTuner:
             'test_data': self.test_data,
             'max_k': max(self.k_values),
         }
-
-        if self.image_dataloader is not None:
-            self.image_dataloader.open_lmdb()
 
         evaluator = Evaluation(**evaluator_params)
         for k in self.k_values:

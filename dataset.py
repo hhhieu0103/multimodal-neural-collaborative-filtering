@@ -13,6 +13,7 @@ class NCFDataset(Dataset):
             feature_dims = None, # Dictionary, key: feature, value: (input, output)
             df_features = None,
             image_dataloader: MemMapDataLoader=None,
+            audio_dataloader: MemMapDataLoader=None,
     ):
         """
         Dataset for NCF model with support for time features and metadata.
@@ -32,6 +33,7 @@ class NCFDataset(Dataset):
         self.df_features = df_features.copy().set_index('item_id') if df_features is not None else None
 
         self.image_dataloader = image_dataloader
+        self.audio_dataloader = audio_dataloader
 
     def __len__(self):
         """Get the number of interactions in the dataset"""
@@ -57,4 +59,11 @@ class NCFDataset(Dataset):
             image_features = self.image_dataloader.get_tensor(item_idx)
             image_tensor = torch.tensor(image_features, dtype=torch.float32)
 
-        return self.users[idx], self.items[idx], self.ratings[idx], features_idx, image_tensor
+        audio_tensor = None
+        if self.audio_dataloader is not None:
+            item_idx = self.items[idx].item()
+            audio_tensor = self.audio_dataloader.get_tensor(item_idx)
+            if not isinstance(audio_tensor, torch.Tensor):
+                audio_tensor = torch.tensor(audio_tensor, dtype=torch.float32)
+
+        return self.users[idx], self.items[idx], self.ratings[idx], features_idx, image_tensor, audio_tensor

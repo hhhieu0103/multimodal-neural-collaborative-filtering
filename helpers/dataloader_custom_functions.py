@@ -1,11 +1,15 @@
 import torch
 
+from helpers.mem_map_dataloader import MemMapDataLoader
+
+
 def collate_fn(batch):
     users = [x[0] for x in batch]
     items = [x[1] for x in batch]
     ratings = [x[2] for x in batch]
     feature_dicts = [x[3] for x in batch]
     images = [x[4] for x in batch]
+    audio = [x[5] for x in batch]
 
     users = torch.stack(users)
     items = torch.stack(items)
@@ -33,11 +37,21 @@ def collate_fn(batch):
     else:
         images = None
 
-    return users, items, ratings, features, images
+    sample_audio = audio[0]
+    if sample_audio is not None:
+        audio = torch.stack(audio)
+    else:
+        audio = None
+
+    return users, items, ratings, features, images, audio
 
 
 def worker_init_fn(worker_id):
     worker_info = torch.utils.data.get_worker_info()
     dataset = worker_info.dataset  # the dataset copy in this worker process
 
-    dataset.image_dataloader.open_lmdb()
+    if isinstance(dataset.image_dataloader, MemMapDataLoader):
+        dataset.image_dataloader.open_lmdb()
+
+    if isinstance(dataset.audio_dataloader, MemMapDataLoader):
+        dataset.audio_dataloader.open_lmdb()

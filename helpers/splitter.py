@@ -6,7 +6,7 @@ class Splitter():
     def __init__(self, df: pd.DataFrame):
         self.df = df
 
-    def leave_k_out_split(self, k_val=1, k_test=1, time_column='timestamp', rating_col='rating_imp'):
+    def leave_k_out_split(self, k_val=1, k_test=1, time_column='timestamp', rating_col='rating_imp', mode='warm'):
         """
         Split interactions dataframe using a leave-k-out strategy per user, ensuring test samples are positive.
 
@@ -65,10 +65,16 @@ class Splitter():
             # Get number of interactions for this user
             n_interactions = len(user_df)
 
-            # If user has too few interactions, put all in training set
+            # If user has too few interactions, put all in training set (warm) or test set (cold)
             if n_interactions < k_total:
-                train_dfs.append(user_df)
-                train_interactions += n_interactions
+                if mode == 'warm':
+                    train_dfs.append(user_df)
+                    train_interactions += n_interactions
+                elif mode == 'cold':
+                    test_dfs.append(user_df)
+                    test_interactions += n_interactions
+                else:
+                    raise ValueError("Invalid mode")
                 continue
 
             # Sort by timestamp (most recent last)
